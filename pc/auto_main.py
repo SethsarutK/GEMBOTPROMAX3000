@@ -182,7 +182,8 @@ def run_real(args):
 
     cap, still = open_source(args.source, exposure=args.exposure)
     tracker = RobotTracker(marker_id=C.ARUCO_ID,
-                           dict_name=getattr(cv2.aruco, C.ARUCO_DICT), calib=calib)
+                           dict_name=getattr(cv2.aruco, C.ARUCO_DICT), calib=calib,
+                           cam_height_cm=C.CAM_HEIGHT_CM, tag_height_cm=C.TAG_HEIGHT_CM)
     link = RobotLink()
     pl = Planner(link, zones_cm, zone_r)
 

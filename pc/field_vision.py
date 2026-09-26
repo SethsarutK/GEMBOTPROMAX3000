@@ -477,9 +477,14 @@ class RobotTracker:
     และบอกได้ทั้ง "อยู่ตรงไหน" และ "หมุนไปกี่องศา" จาก tag ใบเดียว
     """
 
-    def __init__(self, marker_id=0, dict_name=cv2.aruco.DICT_4X4_50, calib=None):
+    def __init__(self, marker_id=0, dict_name=cv2.aruco.DICT_4X4_50, calib=None,
+                 cam_height_cm=0.0, tag_height_cm=0.0):
         self.marker_id = marker_id
         self.calib = calib          # FieldCalibration: ถ้ามี จะคืนมุม/ตำแหน่งใน cm ด้วย
+        # v3.7 parallax: tag อยู่สูงจากพื้น -> homography (ที่ถูกเฉพาะบนพื้น) จะวางมันเลยจริง
+        # แก้โดยหดระยะจากจุดใต้กล้อง (nadir ~ กลางภาพ) ด้วยสัดส่วน (H-h)/H
+        self.parallax_k = (cam_height_cm - tag_height_cm) / cam_height_cm if cam_height_cm > 0 else 1.0
+        self.nadir_cm = None        # คำนวณครั้งแรกที่รู้ขนาดเฟรม
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(dict_name)
         # รองรับทั้ง OpenCV เวอร์ชันใหม่และเก่า
         if hasattr(cv2.aruco, "ArucoDetector"):
@@ -530,9 +535,14 @@ class RobotTracker:
             # --- มุมและตำแหน่งใน field frame (cm) ---
             # สำคัญ: กล้องเบี้ยว มุมใน pixel ไม่เท่ามุมจริง ต้องแปลงจุดผ่าน H ก่อน
             if self.calib is not None and self.calib.H is not None:
-                cm_c = self.calib.to_field((cx, cy))
-                cm_t = self.calib.to_field(tuple(top_mid))
-                cm_b = self.calib.to_field(tuple(bot_mid))
+                if self.nadir_cm is None:
+                    h_, w_ = frame.shape[:2]
+                    self.nadir_cm = self.calib.to_field((w_ / 2.0, h_ / 2.0))
+                nx, ny, k = self.nadir_cm[0], self.nadir_cm[1], self.parallax_k
+                fix = lambda p: (nx + (p[0] - nx) * k, ny + (p[1] - ny) * k)
+                cm_c = fix(self.calib.to_field((cx, cy)))
+                cm_t = fix(self.calib.to_field(tuple(top_mid)))
+                cm_b = fix(self.calib.to_field(tuple(bot_mid)))
                 pose["cm"] = cm_c
                 pose["angle_cm_deg"] = float(np.degrees(
                     np.arctan2(cm_t[1] - cm_b[1], cm_t[0] - cm_b[0])))
