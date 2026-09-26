@@ -1,0 +1,6 @@
+﻿__pycache__/
+*.pyc
+pc/follow_log.csv
+*.log
+.vscode/
+
