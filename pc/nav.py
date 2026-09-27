@@ -164,3 +164,99 @@ def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
     if abs(err) <= C.HEADING_DEADBAND_DEG:
         corr = 0
     return int(clamp(v + corr, -100, 100)), int(clamp(v - corr, -100, 100)), False
+
+
+# ---------------------------------------------------------------
+#  v3.8: หาเส้นทางหลบหิน (A* บนตาราง)  — ใช้ตอน GO_APPROACH / GO_ZONE_AP
+#  หินทุกก้อนที่กล้องเห็น (ยกเว้นก้อนเป้าหมาย) = สิ่งกีดขวาง ขยายด้วย PATH_INFLATE_CM
+#  คืน list waypoint (cm) ไม่รวมจุดเริ่ม แต่รวมจุดหมาย; [] ถ้าไปตรงได้; None ถ้าถูกล้อมหาทางไม่ได้
+# ---------------------------------------------------------------
+import heapq
+
+
+def _los_free(free, a, b):
+    """เดินเส้นตรงบนตารางจาก cell a ไป b ผ่านแต่ช่องว่างไหม (Bresenham)"""
+    (x0, y0), (x1, y1) = a, b
+    dx, dy = abs(x1 - x0), abs(y1 - y0)
+    sx, sy = (1 if x1 > x0 else -1), (1 if y1 > y0 else -1)
+    err = dx - dy
+    while True:
+        if not free[y0][x0]:
+            return False
+        if (x0, y0) == (x1, y1):
+            return True
+        e2 = 2 * err
+        if e2 > -dy: err -= dy; x0 += sx
+        if e2 < dx:  err += dx; y0 += sy
+
+
+def plan_path(sx, sy, gx, gy, obstacles_cm, inflate_cm=None, cell_cm=None):
+    """
+    ช่องใกล้หิน (ภายใน inflate) ไม่ได้ "ห้ามผ่าน" แต่ "แพง" (คูณ PATH_PENALTY) — เส้นทางจึงมีเสมอ
+    แม้หุ่นจะยืนอยู่กลางกอง (หลัง PICK) หรือจุดหมายอยู่ชิดกอง: มันจะออก/เข้าทางที่ทับหินน้อยที่สุด
+    ห้ามผ่านจริงเฉพาะขอบสนาม (กันชนกำแพง)
+    """
+    inflate = C.PATH_INFLATE_CM if inflate_cm is None else inflate_cm
+    cell = C.PATH_CELL_CM if cell_cm is None else cell_cm
+    W, H = int(FIELD_W_CM / cell) + 1, int(FIELD_H_CM / cell) + 1
+
+    def to_cell(x, y):
+        return (min(max(int(round(x / cell)), 0), W - 1), min(max(int(round(y / cell)), 0), H - 1))
+
+    cost = [[1.0] * W for _ in range(H)]          # ค่าผ่านต่อช่อง
+    free = [[True] * W for _ in range(H)]         # True = ไม่ติดหิน (ใช้ตอนย่อเส้นทาง)
+    r_c = inflate / cell
+    for (ox, oy) in obstacles_cm:
+        cx, cy = ox / cell, oy / cell
+        for yy in range(max(0, int(cy - r_c) - 1), min(H, int(cy + r_c) + 2)):
+            for xx in range(max(0, int(cx - r_c) - 1), min(W, int(cx + r_c) + 2)):
+                if (xx - cx) ** 2 + (yy - cy) ** 2 <= r_c * r_c:
+                    cost[yy][xx] = C.PATH_PENALTY; free[yy][xx] = False
+    m = int(C.ROBOT_BODY_R_CM / cell)
+    wall = [[(xx < m or yy < m or xx >= W - m or yy >= H - m) for xx in range(W)] for yy in range(H)]
+    s, g = to_cell(sx, sy), to_cell(gx, gy)
+    wall[s[1]][s[0]] = wall[g[1]][g[0]] = False
+
+    if _los_free(free, s, g):
+        return []                                     # ไปตรงได้เลย ไม่ทับหิน
+
+    def h(a):
+        return math.hypot(a[0] - g[0], a[1] - g[1])
+    openq = [(h(s), 0.0, s)]
+    came, gcost = {s: None}, {s: 0.0}
+    steps = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+             (1, 1, 1.4142), (1, -1, 1.4142), (-1, 1, 1.4142), (-1, -1, 1.4142)]
+    found = False
+    while openq:
+        _, gc, cur = heapq.heappop(openq)
+        if cur == g:
+            found = True; break
+        if gc > gcost.get(cur, 1e9):
+            continue
+        for dx, dy, w in steps:
+            nx, ny = cur[0] + dx, cur[1] + dy
+            if not (0 <= nx < W and 0 <= ny < H) or wall[ny][nx]:
+                continue
+            ng = gc + w * cost[ny][nx]
+            if ng < gcost.get((nx, ny), 1e9):
+                gcost[(nx, ny)] = ng; came[(nx, ny)] = cur
+                heapq.heappush(openq, (ng + h((nx, ny)), ng, (nx, ny)))
+    if not found:
+        return None
+    cells = []
+    c = g
+    while c is not None:
+        cells.append(c); c = came[c]
+    cells.reverse()
+    # ย่อเส้นทาง: ข้ามได้เฉพาะช่วงที่เส้นตรงไม่ทับหิน
+    wp = []
+    i = 0
+    while i < len(cells) - 1:
+        j = len(cells) - 1
+        while j > i + 1 and not _los_free(free, cells[i], cells[j]):
+            j -= 1
+        wp.append(cells[j]); i = j
+    out = [(x * cell, y * cell) for (x, y) in wp]
+    if out:
+        out[-1] = (gx, gy)
+    return out

@@ -62,6 +62,8 @@ class SimWorld:
         self.bin = []
         self.pending = None
         self.gems = []
+        self.runover = 0            # v3.8: นับครั้งที่ตัวหุ่นทับหินก้อนอื่น (วัดผลการหลบ)
+        self._over = set()
         random.seed(3)
         for c in COLOR_CLASSES:
             for _ in range(9):
@@ -77,6 +79,13 @@ class SimWorld:
         r = math.radians(self.th)
         self.x = min(max(self.x + v * math.cos(r) * dt, 5), 205)
         self.y = min(max(self.y + v * math.sin(r) * dt, 5), 115)
+        # นับหินที่ตัวหุ่น (วงรัศมี BODY_R) ทับ — นับก้อนละครั้งต่อการทับต่อเนื่อง
+        now_over = set()
+        for g in self.gems:
+            if nav.dist(self.x, self.y, *g["cm"]) < C.ROBOT_BODY_R_CM:
+                now_over.add(id(g))
+        self.runover += len(now_over - self._over)
+        self._over = now_over
 
     def do_action(self):
         if self.pending == "pick":
@@ -103,7 +112,7 @@ class SimWorld:
     def draw(self, scale=4):
         img = np.full((120 * scale, 210 * scale, 3), (200, 215, 235), np.uint8)
         for name, (zx, zy) in self.zones.items():
-            cv2.circle(img, (int(zx * scale), int(zy * scale)), int(12 * scale), DRAW_BGR[name], 2)
+            cv2.circle(img, (int(zx * scale), int(zy * scale)), int(10 * scale), DRAW_BGR[name], 2)
         for g in self.gems:
             cv2.circle(img, (int(g["cm"][0] * scale), int(g["cm"][1] * scale)),
                        5 if g["area"] > 450 else 3, DRAW_BGR[g["class"]], -1)
@@ -115,14 +124,20 @@ class SimWorld:
         cv2.putText(img, f"holding={len(self.bin)}", (p[0] + 20, p[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         return img
 
+    def draw_path(self, img, path, scale=4):
+        pts = [(int(self.x * scale), int(self.y * scale))] + [(int(x * scale), int(y * scale)) for x, y in path]
+        for a, b in zip(pts, pts[1:]):
+            cv2.line(img, a, b, (0, 140, 255), 2)
+
 
 # =====================================================================
 def run_sim(args):
-    zones = {"DEEP_CRIMSON": (75, 25), "NEON_CYAN": (130, 25), "LIME_GREEN": (30, 45),
-             "IRIDESCENT_VIOLET": (30, 85), "DEEP_SKY_BLUE": (75, 100), "MARIGOLD_ACCENT": (130, 100)}
+    # ตำแหน่งวงตามสนามจริง (field_map 26 ก.ย.) เพื่อให้ sim เจอปัญหาเรขาคณิตเดียวกับของจริง
+    zones = {"IRIDESCENT_VIOLET": (185, 34), "NEON_CYAN": (132, 18), "DEEP_CRIMSON": (151, 109),
+             "MARIGOLD_ACCENT": (85, 18), "DEEP_SKY_BLUE": (85, 108), "LIME_GREEN": (182, 83)}
     world = SimWorld(zones)
     link = SimLink(world)
-    pl = Planner(link, zones, zone_radius_cm=12)
+    pl = Planner(link, zones, zone_radius_cm=10)
     dt = 1.0 / C.LOOP_HZ
     t_last = time.time()
     pl.start()
@@ -134,8 +149,10 @@ def run_sim(args):
         msg = pl.step(world.pose(), "OK", [dict(g) for g in world.gems])
         if not headless:
             img = world.draw()
+            if pl.path:
+                world.draw_path(img, pl.path)
             cv2.putText(img, f"{pl.state}: {msg}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-            cv2.putText(img, f"t={pl.elapsed():.0f}s delivered={pl.delivered}", (10, 40),
+            cv2.putText(img, f"t={pl.elapsed():.0f}s delivered={pl.delivered} runover={world.runover}", (10, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
             cv2.imshow("GEMBOT sim", img)
             k = cv2.waitKey(int(dt * 1000 / args.speed)) & 0xFF
@@ -144,7 +161,7 @@ def run_sim(args):
         else:
             time.sleep(dt / args.speed)
         if pl.state == "DONE":
-            print("SIM DONE delivered =", pl.delivered)
+            print(f"SIM DONE delivered = {pl.delivered}   run-over other gems = {world.runover}")
             break
     return pl.delivered
 

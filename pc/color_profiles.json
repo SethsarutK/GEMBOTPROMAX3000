@@ -16,16 +16,16 @@
     "v_max": 250
   },
   "LIME_GREEN": {
-    "h_min": 56,
-    "h_max": 77,
-    "s_min": 71,
-    "s_max": 207,
-    "v_min": 107,
-    "v_max": 180
+    "h_min": 61,
+    "h_max": 124,
+    "s_min": 120,
+    "s_max": 255,
+    "v_min": 154,
+    "v_max": 184
   },
   "IRIDESCENT_VIOLET": {
-    "h_min": 133,
-    "h_max": 168,
+    "h_min": 142,
+    "h_max": 162,
     "s_min": 54,
     "s_max": 255,
     "v_min": 28,
@@ -40,11 +40,11 @@
     "v_max": 230
   },
   "NEON_CYAN": {
-    "h_min": 87,
-    "h_max": 110,
-    "s_min": 139,
-    "s_max": 218,
-    "v_min": 180,
-    "v_max": 233
+    "h_min": 80,
+    "h_max": 97,
+    "s_min": 109,
+    "s_max": 255,
+    "v_min": 194,
+    "v_max": 255
   }
 }

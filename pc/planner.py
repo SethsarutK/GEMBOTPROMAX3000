@@ -80,6 +80,8 @@ class Planner:
         self.blacklist = []         # หินที่หยิบไม่ได้ (cm, class)
         self.pick_pos = None
         self._last_cmd = (0, 0)
+        self.path = []              # waypoint ที่เหลือ (cm) ตอน GO_APPROACH / GO_ZONE_AP
+        self.path_t = 0.0
 
     # ---------- helpers ----------
     def _go(self, s):
@@ -131,6 +133,39 @@ class Planner:
     def _count_in_zone(self, gems, color):
         return sum(1 for g in gems if g["class"] == color and self._in_zone(g["cm"]) == color)
 
+    # ---------- หลบหิน (v3.8) ----------
+    def _obstacles(self, gems, exclude=None):
+        """ตำแหน่งหินทุกก้อนที่ต้องหลบ (ยกเว้นก้อนเป้าหมาย)"""
+        out = []
+        for g in gems:
+            if exclude is not None and g["class"] == exclude["class"] \
+                    and nav.dist(*g["cm"], *exclude["cm"]) < 4.0:
+                continue
+            out.append(g["cm"])
+        return out
+
+    def _go_via(self, ax, ay, th, goal, gems, exclude=None):
+        """
+        เหมือน nav.go_to แต่เดินตาม waypoint ที่หลบหิน (คำนวณใหม่ทุก PATH_REPLAN_S)
+        return (vl, vr, done)
+        """
+        if not C.PATH_AVOID:
+            return nav.go_to(ax, ay, th, *goal)
+        if time.time() - self.path_t > C.PATH_REPLAN_S:
+            p = nav.plan_path(ax, ay, goal[0], goal[1], self._obstacles(gems, exclude))
+            self.path = [goal] if p is None else (p if p else [goal])
+            self.path_t = time.time()
+        # ตัด waypoint กลางทางที่ถึงแล้ว (ใช้ tol หลวม) จุดสุดท้ายใช้ go_to ปกติ
+        while len(self.path) > 1 and nav.dist(ax, ay, *self.path[0]) <= C.PATH_WP_TOL_CM:
+            self.path.pop(0)
+        if len(self.path) > 1:
+            vl, vr, _ = nav.go_to(ax, ay, th, *self.path[0])
+            return vl, vr, False
+        return nav.go_to(ax, ay, th, *goal)
+
+    def _path_reset(self):
+        self.path, self.path_t = [], 0.0
+
     # ---------- เลือกหิน ----------
     def _choose(self, ax, ay, gems):
         loose = [g for g in gems if self._in_zone(g["cm"]) is None
@@ -176,19 +211,27 @@ class Planner:
         ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
         return g, ap
 
-    def _zone_approach(self, color, gems):
+    def _zone_approach(self, color, gems, ax=None, ay=None):
         """
         v2: ไม่มีกระบะแล้ว ปากหนีบถือหินค้างมาตลอดทาง -> ต้อง "หันหน้าเข้าหาวงโดยตรง"
-        แล้วเดินหน้าเข้าไปปล่อย (ตรงข้ามกับของเดิมที่หมุนกลับตัวแล้วถอยเข้าด้วยท้ายกระบะ)
-        จุดยืน (approach) อยู่ฝั่งเดียวกับกอง ห่างจากวงตามระยะ standoff + ระยะเอื้อมปากหนีบ
+        แล้วเดินหน้าเข้าไปปล่อย
+        v3.8: ทิศเข้าวง = จาก "ตำแหน่งหุ่นตอนนี้" ไปวง (เดิมใช้ กอง->วง ซึ่งทำให้จุดยืนไปตกกลางกอง
+              เมื่อวงอยู่ใกล้กอง) และถ้าจุดยืนยังทับกองอยู่ ให้ตัด standoff ออก
         """
         zx, zy = self.zones[color]
-        pile = self._pile_center([g for g in gems if self._in_zone(g["cm"]) is None]) or (105, 60)
-        dx, dy = zx - pile[0], zy - pile[1]      # ทิศจาก "กอง" ไปหา "วง" (หน้าหุ่นจะชี้ทางนี้)
+        loose = [g for g in gems if self._in_zone(g["cm"]) is None]
+        pile = self._pile_center(loose) or (105, 60)
+        pile_r = max([nav.dist(*g["cm"], *pile) for g in loose], default=0.0)
+        pile_r = min(pile_r, 30.0)
+        ox, oy = (ax, ay) if ax is not None else pile
+        dx, dy = zx - ox, zy - oy               # ทิศจากหุ่นไปหาวง (หน้าหุ่นจะชี้ทางนี้)
         n = math.hypot(dx, dy) or 1.0
         dx, dy = dx / n, dy / n
         back = self.zr + C.ZONE_STANDOFF_CM + C.GRIP_REACH_CM
-        ap = (zx - dx * back, zy - dy * back)     # ยืนฝั่งกอง หันหน้าเข้าวง
+        ap = (zx - dx * back, zy - dy * back)
+        if nav.dist(*ap, *pile) < pile_r + C.ROBOT_BODY_R_CM:
+            back = self.zr + C.GRIP_REACH_CM      # จุดยืนทับกอง -> ยืนชิดขอบวงเลย
+            ap = (zx - dx * back, zy - dy * back)
         ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
         place_pt = (zx - dx * self.zr * (1 - C.DUMP_DEPTH_FRAC),
                    zy - dy * self.zr * (1 - C.DUMP_DEPTH_FRAC))
@@ -257,11 +300,12 @@ class Planner:
             self.target, self.approach = res
             self.color = self.target["class"]
             self.retry = 0
+            self._path_reset()
             self._go("GO_APPROACH")
             return f"target {self.color} at {tuple(round(v) for v in self.target['cm'])}"
 
         if st == "GO_APPROACH":
-            vl, vr, done = nav.go_to(ax, ay, th, *self.approach)
+            vl, vr, done = self._go_via(ax, ay, th, self.approach, gems, exclude=self.target)
             self._drive(vl, vr)
             if done:
                 self._go("ALIGN")
@@ -330,14 +374,15 @@ class Planner:
             return "BACKOFF"
 
         if st == "GO_ZONE":
-            ap, self.dump_pt, self.zone_heading = self._zone_approach(self.color, gems)
+            ap, self.dump_pt, self.zone_heading = self._zone_approach(self.color, gems, ax, ay)
             self.zone_before = self._count_in_zone(gems, self.color)
             self.zone_ap = ap
+            self._path_reset()
             self._go("GO_ZONE_AP")
             return "GO_ZONE"
 
         if st == "GO_ZONE_AP":
-            vl, vr, done = nav.go_to(ax, ay, th, *self.zone_ap)
+            vl, vr, done = self._go_via(ax, ay, th, self.zone_ap, gems)
             self._drive(vl, vr)
             if done:
                 self._go("ZONE_ALIGN")
