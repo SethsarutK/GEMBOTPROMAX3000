@@ -4,3 +4,4 @@ pc/follow_log.csv
 *.log
 .vscode/
 
+pc/gesture_recognizer.task
