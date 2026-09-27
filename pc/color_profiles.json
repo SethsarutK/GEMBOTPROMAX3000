@@ -4,24 +4,24 @@
     "h_max": 54,
     "s_min": 156,
     "s_max": 254,
-    "v_min": 38,
+    "v_min": 189,
     "v_max": 255
   },
   "DEEP_CRIMSON": {
-    "h_min": 175,
-    "h_max": 179,
-    "s_min": 23,
+    "h_min": 166,
+    "h_max": 178,
+    "s_min": 17,
     "s_max": 255,
-    "v_min": 135,
-    "v_max": 250
+    "v_min": 186,
+    "v_max": 255
   },
   "LIME_GREEN": {
-    "h_min": 61,
-    "h_max": 124,
+    "h_min": 20,
+    "h_max": 136,
     "s_min": 120,
-    "s_max": 255,
-    "v_min": 154,
-    "v_max": 184
+    "s_max": 187,
+    "v_min": 174,
+    "v_max": 221
   },
   "IRIDESCENT_VIOLET": {
     "h_min": 142,
@@ -32,12 +32,12 @@
     "v_max": 255
   },
   "DEEP_SKY_BLUE": {
-    "h_min": 86,
-    "h_max": 113,
-    "s_min": 231,
+    "h_min": 87,
+    "h_max": 122,
+    "s_min": 242,
     "s_max": 255,
-    "v_min": 55,
-    "v_max": 230
+    "v_min": 120,
+    "v_max": 247
   },
   "NEON_CYAN": {
     "h_min": 80,

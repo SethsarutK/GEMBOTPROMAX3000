@@ -35,7 +35,7 @@
 #define PWM_FREQ 20000
 #define PWM_RES_BITS 8
 
-#define MOTOR_MIN_PWM 180   // PWM ที่ล้อ 'เริ่ม' หมุนบนพื้น (225 สูงไป ทุกคำสั่งกลายเป็นเต็มสปีด คุมทิศไม่ได้)
+#define MOTOR_MIN_PWM 130   // PWM ที่ล้อ 'เริ่ม' หมุนบนพื้น (225 สูงไป ทุกคำสั่งกลายเป็นเต็มสปีด คุมทิศไม่ได้)
 
 #define L_TRIM 1.00f
 #define R_TRIM 1.00f
