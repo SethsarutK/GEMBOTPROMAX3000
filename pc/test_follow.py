@@ -25,6 +25,7 @@ import argparse, math, time
 import cv2
 
 import auto_config as C
+import ui                     # v3.9: ตัวช่วยวาดจอ (ไม่มีค่าปรับจูน)
 import nav
 from link import RobotLink
 from planner import GemTracker
@@ -258,16 +259,7 @@ def main():
                        f"{vl},{vr},{running},{color}\n")
 
         # ---------- วาด ----------
-        lines = [
-            f"{'RUN ' if running else 'STOP'}  MODE={'CLICK' if click_mode else 'COLOR'}  target color={color}  "
-            f"V_MAX={C.V_MAX}  TURN_SIGN={C.TURN_SIGN:+d}",
-            f"link={'OK' if link.alive else 'LOST'}{' NET-ERR' if link.net_error else ''} ack={link.seq_ack}/{link.seq}  pose={pstat}  fps={fps:.1f}"
-            + (f"  axle=({ax:.0f},{ay:.0f}) th={th:.0f}" if have_pose else ""),
-            info + (f"   [{lines_extra}]" if calib_step else "") + ("  [LOG]" if logf else ""),
-            "seen: " + " ".join(f"{c.split('_')[-1][:4]}={sum(1 for g in stable if g['class']==c)}" for c in COLOR_CLASSES)
-            + f"   ambiguous={n_amb}   keys: 1-6 color, c click, SPACE go/stop, k AUTO-CALIB, l log, q quit",
-        ]
-        out = draw_overlay(frame, zones_px, gems_px, pose, calib, lines)
+        out = draw_overlay(frame, zones_px, gems_px, pose, calib, None)
         draw_capsules(out, calib, pose)
         if have_pose:
             a_px = calib.to_pixel((ax, ay))
@@ -283,6 +275,34 @@ def main():
             cv2.drawMarker(out, gp, (255, 0, 255), cv2.MARKER_CROSS, 18, 2)
             if have_pose:
                 cv2.line(out, calib.to_pixel((ax, ay)), gp, (255, 0, 255), 1)
+        # ---------- HUD (v3.9) : แสดงผลอย่างเดียว ไม่เปลี่ยนค่า/การทำงานใดๆ ----------
+        seen_txt = "  ".join(f"{c.split('_')[-1][:4]}={sum(1 for g in stable if g['class'] == c)}"
+                             for c in COLOR_CLASSES)
+        rows = [
+            ("สถานะ", "กำลังวิ่ง" if running else "หยุดอยู่", "ok" if running else "warn"),
+            ("เป้าหมาย", "คลิกจุดบนจอ" if click_mode else ("สี " + color if color else "ยังไม่เลือกสี")),
+            None,
+            ("WiFi ถึงหุ่น", "ต่ออยู่" if link.alive else "ขาด!", "ok" if link.alive else "bad"),
+            ("กล้องเห็นหุ่น", "เห็น" if pstat == "OK" else "ไม่เห็น!", "ok" if pstat == "OK" else "bad"),
+            ("ตำแหน่งเพลา", f"({ax:.0f}, {ay:.0f}) cm   หัน {th:.0f}°" if have_pose else "-", "dim"),
+            ("ความลื่นภาพ", f"{fps:.0f} fps", "ok" if fps >= 10 else "warn"),
+            None,
+            ("ความเร็วสูงสุด", f"{C.V_MAX}"),
+            ("ทิศหมุน", f"{C.TURN_SIGN:+d}"),
+            ("หินที่เห็น", seen_txt + (f"   ·   สีกำกวม {n_amb}" if n_amb else "")),
+        ]
+        if calib_step:
+            rows.append(("กำลังวัดทิศ", lines_extra, "warn"))
+        if logf:
+            rows.append(("บันทึก log", "เปิดอยู่ (follow_log.csv)", "warn"))
+        y = 12
+        _, hh = ui.panel(out, 12, y, rows, title="TEST FOLLOW — ทดสอบเดินหาหิน")
+        if info:
+            state = "bad" if ("LOST" in info or "abort" in info or "no stable" in info) else "ok"
+            ui.banner(out, 12, y + hh + 8, info, state, size=18)
+        ui.keybar(out, [("1-6", "เลือกสี"), ("C", "โหมดคลิกจุด"), ("SPACE", "วิ่ง / หยุด"),
+                        ("K", "วัดทิศ"), ("W/S/A/D", "ขยับ 1 วิ"), ("T", "กลับทิศหมุน"),
+                        ("+/-", "ความเร็ว"), ("L", "log"), ("Q", "ออก")])
         cv2.imshow(win, out)
 
         # ---------- คีย์ ----------

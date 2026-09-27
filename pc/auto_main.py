@@ -10,6 +10,7 @@ import argparse, math, time, random
 import cv2, numpy as np
 
 import auto_config as C
+import ui                     # v3.9: ตัวช่วยวาดจอ (ไม่มีค่าปรับจูน)
 import nav
 from planner import Planner
 from field_vision import (load_profiles, load_field_map, RobotTracker,
@@ -234,17 +235,40 @@ def run_real(args):
 
         msg = pl.step(pose, pstat, gems_cm)
 
-        lines = [f"[{pl.state}] {msg}",
-                 f"t={pl.elapsed():.0f}s left={pl.time_left():.0f}s delivered={pl.delivered} bin={pl.bin_count} color={pl.color}",
-                 f"link={'OK' if link.alive else 'LOST'}{' NET-ERR' if link.net_error else ''} busy={link.busy} fps={fps:.1f}  pose={pstat}"
-                 + (f" ({pose['cm'][0]:.0f},{pose['cm'][1]:.0f}) {pose['angle_cm_deg']:.0f}deg" if pose and 'cm' in pose else ""),
-                 f"gems stable={len(pl.tracker.stable())} ambiguous={n_ambig}  BIG_ONLY={C.BIG_GEM_ONLY}   SPACE=start/stop q=quit"]
-        out = draw_overlay(frame, zones_px, gems_px, pose, calib, lines)
+        out = draw_overlay(frame, zones_px, gems_px, pose, calib, None)
         draw_capsules(out, calib, pose, holding=pl.bin_count > 0)
         # วาดเป้าหมาย/จุด approach
         if pl.target is not None and pl.state not in ("IDLE", "DONE"):
             tp = calib.to_pixel(pl.target["cm"]); cv2.circle(out, tp, 12, (0, 0, 255), 2)
             if pl.approach: cv2.circle(out, calib.to_pixel(pl.approach), 6, (255, 0, 255), 2)
+        # ---------- HUD (v3.9) : แสดงผลอย่างเดียว ไม่เปลี่ยนค่า/การทำงานใดๆ ----------
+        running = pl.state not in ("IDLE", "DONE")
+        pos_txt = (f"({pose['cm'][0]:.0f}, {pose['cm'][1]:.0f}) cm  หัน {pose['angle_cm_deg']:.0f}°"
+                   if pose and "cm" in pose else "-")
+        y = 12
+        _, hh = ui.panel(out, 12, y, [
+            ("สถานะ", "กำลังทำงาน" if running else ("จบรอบแล้ว" if pl.state == "DONE" else "หยุดอยู่"),
+             "ok" if running else "warn"),
+            ("เวลา", f"{ui.mmss(pl.elapsed())}   (เหลือ {ui.mmss(pl.time_left())})"),
+            ("ส่งเข้าวงแล้ว", f"{pl.delivered} ก้อน", "ok" if pl.delivered else "dim"),
+            ("ถืออยู่ในปาก", f"{pl.bin_count} ก้อน" + (f"  ·  {pl.color}" if pl.color else "")),
+            None,
+            ("WiFi ถึงหุ่น", "ต่ออยู่" if link.alive else "ขาด!", "ok" if link.alive else "bad"),
+            ("กล้องเห็นหุ่น", "เห็น" if pstat == "OK" else "ไม่เห็น!", "ok" if pstat == "OK" else "bad"),
+            ("ตำแหน่งหุ่น", pos_txt, "dim"),
+            ("หินที่นับได้", f"{len(pl.tracker.stable())} ก้อน"
+             + (f"   ·   สีกำกวม {n_ambig}" if n_ambig else "")),
+            ("ความลื่นภาพ", f"{fps:.0f} fps", "ok" if fps >= 10 else "warn"),
+            ("หยิบเฉพาะก้อนใหญ่", "เปิด" if C.BIG_GEM_ONLY else "ปิด",
+             "warn" if C.BIG_GEM_ONLY else "dim"),
+        ], title="AUTO — โหมดอัตโนมัติ")
+        y += hh + 8
+        _, hb = ui.banner(out, 12, y, ui.state_line(pl.state), "ok" if running else "warn")
+        y += hb + 6
+        ui.panel(out, 12, y, [(str(msg), None, "dim")], size=15, line_h=20)
+        ui.keybar(out, [("SPACE", "เริ่ม / หยุด"),
+                        ("B", "สลับ: หยิบเฉพาะก้อนใหญ่"),
+                        ("Q", "ออกโปรแกรม")])
         cv2.imshow("GEMBOT auto", out)
 
         k = cv2.waitKey(1) & 0xFF

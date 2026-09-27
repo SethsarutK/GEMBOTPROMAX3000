@@ -16,6 +16,7 @@ import time
 import cv2
 import numpy as np
 from link import RobotLink
+import ui                     # v3.9: ตัวช่วยวาดจอ (ไม่มีค่าปรับจูน)
 
 SPEED = 40
 grip = 90                          # ค่าเริ่ม ให้ตรงกับ GRIP_OPEN ใน config.h
@@ -31,15 +32,22 @@ servo_resend_t = 0.0
 print(__doc__)
 
 while True:
-    img = np.zeros((220, 460, 3), np.uint8)
-    lines = [
-        f"link: {'OK' if link.alive else 'LOST'}   busy: {link.busy}   vbat: {link.vbat:.2f}",
-        f"speed: {SPEED}   L={vl} R={vr}",
-        f"servo  grip={grip}   assist={assist}",
-        "W/S/A/D drive  P pick  O dump  1/2 grip 5/6 assist  SPACE stop  Q quit",
-    ]
-    for i, t in enumerate(lines):
-        cv2.putText(img, t, (10, 35 + i * 40), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    # ---------- HUD (v3.9) : แสดงผลอย่างเดียว ไม่เปลี่ยนค่า/การทำงานใดๆ ----------
+    img = np.zeros((330, 660, 3), np.uint8)
+    _, hh = ui.panel(img, 10, 10, [
+        ("WiFi ถึงหุ่น", "ต่ออยู่" if link.alive else "ขาด!", "ok" if link.alive else "bad"),
+        ("หุ่นกำลังหนีบ/ปล่อย", "ใช่ (รอสักครู่)" if link.busy else "ว่าง", "warn" if link.busy else "dim"),
+        ("แรงดันแบต", f"{link.vbat:.2f} V" if link.vbat > 0 else "ไม่ได้วัด", "dim"),
+        None,
+        ("ความเร็วที่ตั้งไว้", f"{SPEED} / 100"),
+        ("ล้อ ซ้าย / ขวา", f"{vl}  /  {vr}", "ok" if (vl or vr) else "dim"),
+        ("มุมปากหนีบ", f"{grip}°"),
+        ("มุม servo ตัวช่วย", f"{assist}°", "dim"),
+    ], title="TELEOP — ขับด้วยคีย์บอร์ด", width=640)
+    ui.keybar(img, [("W", "เดินหน้า"), ("S", "ถอยหลัง"), ("A", "หมุนซ้าย"), ("D", "หมุนขวา"),
+                    ("P", "หนีบ"), ("O", "ปล่อย")], y=10 + hh + 10)
+    ui.keybar(img, [("1/2", "ปรับมุมปาก"), ("5/6", "ปรับตัวช่วย"), ("R", "รีเซ็ตมุม"),
+                    ("+/-", "ความเร็ว"), ("SPACE", "หยุด"), ("Q", "ออก")])
     cv2.imshow("GEMBOT teleop", img)
 
     k = cv2.waitKey(50) & 0xFF

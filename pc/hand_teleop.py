@@ -32,6 +32,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 from link import RobotLink
+import ui                     # v3.9: ตัวช่วยวาดจอ (ไม่มีค่าปรับจูน)
 
 # ---------------- config ----------------
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gesture_recognizer.task")
@@ -193,18 +194,36 @@ def main():
 
                 # ---------- overlay ----------
                 hold_pct = min(1.0, (now - cand_t) / HOLD_S) if cand != "STOP" else 0.0
-                lines = [
-                    f"MODE: {mode}   link: {'OK' if link.alive else 'LOST'}   busy: {link.busy}   vbat: {link.vbat:.2f}",
-                    f"speed: {SPEED}   L={vl} R={vr}" + ("   E-STOP (take hand out)" if estop else ""),
+                rows = [
+                    ("โหมด", "บังคับด้วยมือ" if mode == "HAND" else "บังคับด้วยคีย์บอร์ด", "ok"),
+                    ("WiFi ถึงหุ่น", "ต่ออยู่" if link.alive else "ขาด!", "ok" if link.alive else "bad"),
+                    ("หุ่นกำลังหนีบ/ปล่อย", "ใช่" if link.busy else "ว่าง", "warn" if link.busy else "dim"),
+                    ("ความเร็ว", f"{SPEED} / 100"),
+                    ("ล้อ ซ้าย / ขวา", f"{vl}  /  {vr}", "ok" if (vl or vr) else "dim"),
                 ]
                 if mode == "HAND":
-                    lines.append(f"gesture: {raw_label} ({raw_score:.2f}) -> {cmd}  hold {int(hold_pct * 100)}%")
-                    lines.append(f"active: {active}   {last_event}")
+                    rows += [
+                        None,
+                        ("ท่าที่กล้องเห็น", f"{raw_label}  ({raw_score:.2f})", "dim"),
+                        ("แปลเป็นคำสั่ง", ui.GESTURE_TH.get(cmd, cmd)),
+                        ("ค้างท่าแล้ว", f"{int(hold_pct * 100)} %  (ครบ 100 = สั่งงาน)",
+                         "ok" if hold_pct >= 1 else "warn"),
+                        ("กำลังสั่ง", ui.GESTURE_TH.get(active, active), "ok" if active != "STOP" else "dim"),
+                    ]
+                    if last_event:
+                        rows.append(("ล่าสุด", last_event, "warn"))
                 else:
-                    lines.append(f"servo  grip={grip}   assist={assist}")
-                    lines.append("W/S/A/D drive  P pick  O dump  1/2 grip  5/6 assist  R reset")
-                lines.append("H mode  +/- speed  SPACE stop  Q quit")
-                draw_overlay(img, lines)
+                    rows += [None, ("มุมปากหนีบ", f"{grip}°"), ("มุม servo ตัวช่วย", f"{assist}°", "dim")]
+                if estop:
+                    rows.append(("หยุดฉุกเฉิน", "ค้างอยู่ — เอามือออกจากกล้องเพื่อปลด", "bad"))
+                ui.panel(img, 10, 10, rows, title="HAND TELEOP — บังคับหุ่นด้วยท่ามือ")
+                if mode == "HAND":
+                    ui.keybar(img, [("นิ้วโป้งขึ้น", "เดินหน้า"), ("นิ้วโป้งลง", "ถอย"),
+                                    ("ชี้ขึ้น", "หมุนซ้าย"), ("ชู 2 นิ้ว", "หมุนขวา"),
+                                    ("กำมือ", "หนีบ"), ("แบมือ", "ปล่อย")],
+                              y=img.shape[0] - 2 * (16 + 20))
+                ui.keybar(img, [("H", "สลับโหมดมือ/คีย์บอร์ด"), ("SPACE", "หยุดฉุกเฉิน"),
+                                ("+/-", "ความเร็ว"), ("Q", "ออก")])
                 cv2.imshow("GEMBOT hand teleop", img)
 
                 # ---------- keyboard ----------
