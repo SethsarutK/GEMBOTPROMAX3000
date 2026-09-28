@@ -69,6 +69,7 @@ class RealWorld(auto_main.SimWorld):
         self.hit_ids = {"body": set(), "seat": set(), "jaw": set()}
         self.zone_exits = 0                                       # หิน (สีใดก็ได้) ถูกดันจนหลุดออกจากวง
         self.zone_exit_by = {}                                    # แยกตาม state ของ planner / ส่วนที่ชน
+        self.hit_by = {}                                          # cm ที่หินถูกดัน แยกตาม state/ส่วนที่ชน
         self.cur_state = "?"
 
     def score(self):
@@ -141,6 +142,8 @@ class RealWorld(auto_main.SimWorld):
                 g["cm"] = self._abs(fwd, lat); self.pushes += 1
                 # บัญชีการชน: ก้อนไหนโดนอะไร ขยับไปกี่ cm และหลุดออกจากวงไหม
                 self.hit_cm[moved] += nav.dist(*old, *g["cm"])
+                k = f"{self.cur_state}/{moved}"
+                self.hit_by[k] = self.hit_by.get(k, 0.0) + nav.dist(*old, *g["cm"])
                 if id(g) not in self.hit_ids[moved]:
                     self.hit_ids[moved].add(id(g))
                 zo = self._zone_of(old); zn = self._zone_of(g["cm"])
@@ -261,7 +264,7 @@ def run(seed=3, ideal=False, verbose=True):
         pl.step(pose, "OK", gems)
         if CLOCK.t - t_last > 1000:
             break
-    stats = {"delivered": pl.delivered, "score": world.score(), "zone_exit_by": world.zone_exit_by,
+    stats = {"delivered": pl.delivered, "score": world.score(), "zone_exit_by": world.zone_exit_by, "hit_by": world.hit_by,
              "runover": world.runover, "pushes": world.pushes,
              "picked": sum(1 for l in lines if l.startswith("picked")),
              "still": sum(1 for l in lines if "still there" in l),
