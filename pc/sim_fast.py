@@ -211,7 +211,7 @@ def run(seed=3, ideal=False, verbose=True):
         if s.startswith("picked"):
             verdict["tp" if held_ok else "fp"] += 1
             s += f"   [sim: {'จริง' if held_ok else ('ผิด! ในปากเป็นสีอื่น' if held_wrong else 'ผิด! ปากเปล่า')} d={world.last_pick_d:.1f}]"
-        elif "still there" in s or "pushed" in s:
+        elif ("still there" in s or "pushed" in s) and "assume" not in s:
             verdict["fn" if held_ok else "tn"] += 1
             s += f"   [sim: {'ผิด! หินสีถูกอยู่ในปาก' if held_ok else ('จริง (คว้าสีอื่นมา)' if held_wrong else 'จริง')} d={world.last_pick_d:.1f}]"
         if s.startswith("creep -> pick"):

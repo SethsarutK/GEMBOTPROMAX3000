@@ -91,6 +91,7 @@ class Planner:
         self.pick_nearby = 0        # v4.1: จำนวนหินสีเป้ารอบจุดหนีบ ตอนสั่ง PICK
         self.contested = 0          # v4.1: ก้อนเป้าปัจจุบันโดน "ก้ามมีก้อนอื่นขวาง" มากี่ครั้ง
         self.contested_at = None
+        self.creep_settle = None    # v4.1g: เวลาที่เริ่ม "นิ่งดูซ้ำ" ก่อนหนีบ
         self._last_cmd = (0, 0)
         self.path = []              # waypoint ที่เหลือ (cm) ตอน GO_APPROACH / GO_ZONE_AP
         self.path_t = 0.0
@@ -100,6 +101,7 @@ class Planner:
         self.log(f"[{self.elapsed():5.1f}s] {self.state} -> {s}")
         self.state = s
         self.t_state = time.time()
+        self.creep_settle = None
 
     def elapsed(self):
         return 0.0 if self.t_start is None else time.time() - self.t_start
@@ -357,6 +359,18 @@ class Planner:
         ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
         place_pt = (zx - dx * self.zr * (1 - C.DUMP_DEPTH_FRAC),
                    zy - dy * self.zr * (1 - C.DUMP_DEPTH_FRAC))
+        # v4.1g: จุดปล่อยทับหินที่วางไว้แล้ว -> หินเก่าถูกเขี่ยหลุดวง (sim เห็น 1-2 ครั้ง/รอบ)
+        #        เลื่อนจุดปล่อยไปข้าง ๆ (ตั้งฉากทิศเข้า) หาจุดที่ห่างหินในวงทุกก้อน >= 5.5 cm และยังลึกในวง
+        in_zone = [g["cm"] for g in gems if self._in_zone(g["cm"]) == color]
+        if in_zone:
+            px, py = -dy, dx                         # ตั้งฉากกับทิศเข้าวง
+            for off in (0, 5, -5, 8, -8):
+                cand = (place_pt[0] + px * off, place_pt[1] + py * off)
+                if nav.dist(*cand, zx, zy) > self.zr - 3.0:
+                    continue
+                if all(nav.dist(*cand, *g) >= 5.5 for g in in_zone):
+                    place_pt = cand
+                    break
         return ap, place_pt, math.degrees(math.atan2(dy, dx))
 
     # ---------- main step ----------
@@ -472,10 +486,21 @@ class Planner:
                 return "CREEP realign"
             if in_jaw or lost:
                 vl = vr = 0
+            # v4.1g: "ถึงแล้ว" ต้องนิ่งดูซ้ำ 0.3 วิ (กล้องหน่วง ~0.15 วิ + สั่น) ถ้ายืนยันค่อยหนีบ ไม่งั้นคืบต่อ
+            #        (sim: หนีบพลาดเพราะตำแหน่งจริงห่าง 3.1-3.3 ทั้งที่ประเมินว่าถึง)
+            if (done or in_jaw) and not lost:
+                if self.creep_settle is None:
+                    self.creep_settle = time.time()
+                if time.time() - self.creep_settle < 0.3:
+                    self._drive(0, 0)
+                    return "CREEP settle"
+            else:
+                self.creep_settle = None
             self._drive(vl, vr)
             if done or in_jaw or lost or self.in_state() > C.T_CREEP_TIMEOUT:
                 why = "reach" if done else ("in jaw" if in_jaw else ("track lost" if lost else "timeout"))
                 self._drive(0, 0)
+                self.creep_settle = None
                 # v4.1: มีหินก้อนอื่นอยู่ในแถบก้ามด้วย -> หนีบไปก็ได้ก้อนผิด (ผิดสี) ถอยออกแล้วเลือกใหม่
                 #       (ครั้งที่ 2 ของก้อนเดิม -> blacklist ไปเลย)
                 blockers = self._front_blockers(ax, ay, th, self.target, gems)
@@ -498,7 +523,7 @@ class Planner:
                 self.log(f"creep -> pick ({why})")
                 self.pick_pos = tuple(self.target["cm"])   # จำตำแหน่งหินก่อนหนีบ ไว้เช็คหลังถอย
                 # v4.1: จำว่ารอบ ๆ จุดหนีบมีหินสีนี้กี่ก้อน (ก้ามอาจคว้า "ก้อนข้าง ๆ สีเดียวกัน" แทนก้อนเป้า)
-                self.pick_nearby = self._count_same_near(self.pick_pos, self.target["class"], 10.0)
+                self.pick_nearby = self._count_same_near(self.pick_pos, self.target["class"], 8.0)
                 self.link.pick()
                 self._go("PICK")
             gp = nav.gripper_point(ax, ay, th)
@@ -542,7 +567,7 @@ class Planner:
                     and nav.dist(*self.target["cm"], *self.pick_pos) > 6.0 \
                     and not self._in_jaw_zone(ax, ay, th, self.target["cm"]):
                 pushed = self.target
-            if still and self._count_same_near(self.pick_pos, self.target["class"], 10.0) < self.pick_nearby:
+            if still and self._count_same_near(self.pick_pos, self.target["class"], 8.0) < self.pick_nearby:
                 # v4.1: ก้อนเป้ายังอยู่ แต่หินสีเดียวกันรอบ ๆ หายไป 1 ก้อน = ก้ามคว้าก้อนข้าง ๆ มาแทน (สีถูกอยู่ดี)
                 #       ถ้าลองใหม่ PICK จะเปิดปากทำหินหล่นแล้ววนซ้ำ 3 รอบ -> นับว่าได้ แล้วไปส่ง
                 self.log("target still there but a same-colour neighbour vanished -> assume grabbed neighbour")
