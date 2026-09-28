@@ -88,6 +88,8 @@ class Planner:
         self.lost_since = None
         self.blacklist = []         # หินที่หยิบไม่ได้ (cm, class)
         self.pick_pos = None
+        self.pick_heading = 0.0     # v4.2
+        self.turn_dir = 0           # v4.2: ข้างที่หมุนหลังหนีบ (+1/-1), 0 = ยังไม่เลือก
         self.pick_nearby = 0        # v4.1: จำนวนหินสีเป้ารอบจุดหนีบ ตอนสั่ง PICK
         self.contested = 0          # v4.1: ก้อนเป้าปัจจุบันโดน "ก้ามมีก้อนอื่นขวาง" มากี่ครั้ง
         self.contested_at = None
@@ -431,6 +433,8 @@ class Planner:
         in_zone = [g["cm"] for g in gems if self._in_zone(g["cm"]) == color]
         if in_zone:
             px, py = -dy, dx                         # ตั้งฉากกับทิศเข้าวง
+            # v4.2 หมายเหตุ: ลองยอมเลื่อนข้าง 5 cm (zr-2.5) แล้ว sim แย่ลง (121 -> 110) จึงคงเงื่อนไข zr-3 ไว้
+            #       (ในทางปฏิบัติ = ปล่อยที่จุดกลางแนวเข้าเสมอ)
             for off in (0, 5, -5, 8, -8):
                 cand = (place_pt[0] + px * off, place_pt[1] + py * off)
                 if nav.dist(*cand, zx, zy) > self.zr - 3.0:
@@ -610,6 +614,8 @@ class Planner:
                     return "CREEP contested"
                 self.log(f"creep -> pick ({why})")
                 self.pick_pos = tuple(self.target["cm"])   # จำตำแหน่งหินก่อนหนีบ ไว้เช็คหลังถอย
+                self.pick_heading = th                     # v4.2: ทิศตอนหนีบ ไว้วัดว่าหมุนพ้น 40° แล้ว
+                self.turn_dir = 0                          # v4.2: ให้ PICK_BACKOFF เลือกข้างหมุนใหม่
                 # v4.1: จำว่ารอบ ๆ จุดหนีบมีหินสีนี้กี่ก้อน (ก้ามอาจคว้า "ก้อนข้าง ๆ สีเดียวกัน" แทนก้อนเป้า)
                 self.pick_nearby = self._count_same_near(self.pick_pos, self.target["class"], 8.0)
                 self.link.pick()
@@ -634,12 +640,41 @@ class Planner:
             return "CREEP_BACK"
 
         if st == "PICK_BACKOFF":
-            # ถอยออกให้จุดที่หินเคยอยู่พ้นบริเวณตัดตัวหุ่น -> กล้องตัดสินได้ว่าหินติดมาหรือยังอยู่ที่พื้น
-            self._drive(-C.V_CREEP, -C.V_CREEP)
-            if self.in_state() > C.T_PICK_BACKOFF:
+            # v4.2: ของจริง (28 ก.ย.) คีบไม่แน่น ถอยแล้วพื้นดึงหินหลุดจากก้าม
+            #       -> ไม่ถอยแล้ว "หมุนอยู่กับที่" ไปทางวงปลายทางแทน อย่างน้อย 40° (ปากเลื่อน ~9 cm
+            #          จุดที่หินเคยอยู่จึงพ้นวงที่ถูกซ่อน กล้องตัดสินได้เหมือนเดิม) และได้หันไปทางวงไปในตัว
+            turned = abs(nav.norm_deg(th - self.pick_heading))
+            zx, zy = self.zones.get(self.color, (105, 60))
+            want = nav.heading_to(ax, ay, zx, zy)
+            err = nav.norm_deg(want - th)
+            if turned >= 40.0 or (turned >= 25.0 and abs(err) <= C.HEADING_DEADBAND_DEG) \
+                    or self.in_state() > C.T_PICK_BACKOFF + 3.0:
                 self._drive(0, 0)
                 self._go("VERIFY_PICK")
-            return "PICK_BACKOFF"
+                return "PICK_TURN done"
+            if self.turn_dir == 0:
+                # เลือกข้างที่จะหมุนครั้งเดียวตอนเริ่ม: นับหิน/วงที่มีหิน ที่ปลายก้ามจะกวาดผ่าน (รัศมี ~20 cm, 50°)
+                # ข้างที่กวาดน้อยกว่าชนะ เท่ากันเอาข้างที่ไปทางวง
+                def sweep_cost(sign):
+                    cst = 0.0
+                    for g in gems:
+                        f, l = self._rel_to_robot(ax, ay, th, g["cm"])
+                        rr, ang = math.hypot(f, l), math.degrees(math.atan2(l, f))
+                        if 6.0 < rr < C.GRIP_REACH_CM + 8.0 and 0 < sign * ang < 55.0:
+                            cst += 1.0
+                    for zx, zy in self._filled_zones(gems):
+                        f, l = self._rel_to_robot(ax, ay, th, (zx, zy))
+                        rr, ang = math.hypot(f, l), math.degrees(math.atan2(l, f))
+                        if rr < self.zr + C.GRIP_REACH_CM + 8.0 and 0 < sign * ang < 70.0:
+                            cst += 5.0
+                    return cst
+                pref = 1 if err >= 0 else -1
+                cp, cn = sweep_cost(pref), sweep_cost(-pref)
+                self.turn_dir = pref if cp <= cn else -pref
+            err = self.turn_dir * max(45.0, min(60.0, abs(err)))
+            vl, vr = nav.turn_to_pulsed(ax, ay, th, nav.norm_deg(th + err), self.in_state())[:2]
+            self._drive(vl, vr)
+            return f"PICK_TURN {turned:.0f}deg"
 
         if st == "VERIFY_PICK":
             self._drive(0, 0)

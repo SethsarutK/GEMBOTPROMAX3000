@@ -71,6 +71,7 @@ class RealWorld(auto_main.SimWorld):
         self.zone_exit_by = {}                                    # แยกตาม state ของ planner / ส่วนที่ชน
         self.hit_by = {}                                          # cm ที่หินถูกดัน แยกตาม state/ส่วนที่ชน
         self.cur_state = "?"
+        self.slips = 0                                            # หินหลุดจากปากตอนถอย
 
     def score(self):
         """คะแนนจริง = หินสี X ที่อยู่ในวง X ตอนจบ (ไม่ใช่ที่ planner นับสะสม)"""
@@ -92,9 +93,20 @@ class RealWorld(auto_main.SimWorld):
         er = vr if abs(vr) >= dead else 0
         return el, er * self.R_GAIN
 
+    SLIP_PER_S = 0.6            # ของจริง 28 ก.ย.: คีบไม่แน่น ถอยแล้วหินหลุด (โอกาสหลุดต่อวินาทีที่ถอย)
+
     def update(self, dt):
         vl, vr = self._eff(self.vl, self.vr)
         v = (vl + vr) / 2 * self.SPEED_CM_S
+        # ถอยหลังทั้งที่มีหินในปาก -> พื้นดึงหินหลุดจากก้าม (วางไว้ตรงหน้าปาก)
+        # (v < -3 cm/s = ถอยจริง ๆ ไม่นับการหมุนอยู่กับที่ที่ล้อสองข้างไม่เท่ากันแล้วเลื่อนถอยนิดหน่อย)
+        if not self.ideal and self.bin and v < -3.0 and random.random() < self.SLIP_PER_S * dt:
+            gx, gy = nav.point_ahead(self.x, self.y, self.th, C.GRIP_REACH_CM + 2.0)
+            for g in self.bin:
+                self.gems.append({"cm": (gx + random.uniform(-1, 1), gy + random.uniform(-1, 1)),
+                                  "class": g["class"], "area": g["area"]})
+            self.bin = []
+            self.slips += 1
         w = (vl - vr) / self.W_CM * self.SPEED_CM_S * C.TURN_SIGN
         self.th = nav.norm_deg(self.th + math.degrees(w) * dt * 0.35)
         r = math.radians(self.th)
@@ -123,6 +135,8 @@ class RealWorld(auto_main.SimWorld):
 
     def _push_gems(self):
         """ตัวหุ่น (วงรัศมี BODY_R) และปาก (ที่นั่งหิน fwd=GRIP_REACH, ก้ามกว้าง +-4.5) ดันหิน"""
+        # ก้ามปิด (ถือหินอยู่) แคบกว่าก้ามอ้า: ข้างก้ามอยู่ที่ lat 3.5-5 แทน 4.5-7
+        jaw_in, jaw_out = (3.5, 5.0) if self.bin else (4.5, 7.0)
         for g in self.gems:
             fwd, lat = self._rel(*g["cm"])
             moved = None
@@ -135,8 +149,8 @@ class RealWorld(auto_main.SimWorld):
             elif abs(lat) < 4.5 and C.ROBOT_BODY_FRONT_CM < fwd < C.GRIP_REACH_CM:
                 fwd = C.GRIP_REACH_CM; moved = "seat"
             # ปลายก้ามสองข้าง (fwd GRIP_REACH-2 .. GRIP_REACH+6, lat 4.5..7): ดันออกข้าง
-            elif C.GRIP_REACH_CM - 2 < fwd < C.GRIP_REACH_CM + 6 and 4.5 <= abs(lat) < 7:
-                lat = math.copysign(7.0, lat); moved = "jaw"
+            elif C.GRIP_REACH_CM - 2 < fwd < C.GRIP_REACH_CM + 6 and jaw_in <= abs(lat) < jaw_out:
+                lat = math.copysign(jaw_out, lat); moved = "jaw"
             if moved:
                 old = g["cm"]
                 g["cm"] = self._abs(fwd, lat); self.pushes += 1
@@ -278,7 +292,8 @@ def run(seed=3, ideal=False, verbose=True):
              "hit_body": (len(world.hit_ids["body"]), round(world.hit_cm["body"])),
              "hit_seat": (len(world.hit_ids["seat"]), round(world.hit_cm["seat"])),
              "hit_jaw": (len(world.hit_ids["jaw"]), round(world.hit_cm["jaw"])),
-             "zone_exits": world.zone_exits}
+             "zone_exits": world.zone_exits,
+             "slips": world.slips}
     return stats, lines
 
 
