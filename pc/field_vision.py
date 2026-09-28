@@ -678,12 +678,26 @@ def lock_camera(cap, exposure=None, wb=None):
 
 def open_source(source, width=1280, height=720, exposure=None):
     if str(source).isdigit():
-        # CAP_DSHOW บน Windows เปิดเร็วกว่าและรับค่า exposure ได้ดีกว่า
-        cap = cv2.VideoCapture(int(source), cv2.CAP_DSHOW) if os.name == "nt" \
-            else cv2.VideoCapture(int(source))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap = None
+        if os.name == "nt":
+            # v4.4 (28 ก.ย. วัดจริง cam_probe.py): DirectShow ที่ 1280x720 ติด YUY2 = 4 fps เท่านั้น
+            # MSMF + MJPG ได้ 30 fps และยังตั้ง exposure ได้ -> ใช้ MSMF ก่อน ถ้าเปิดไม่ติดค่อยถอยไป DSHOW แบบเดิม
+            cap = cv2.VideoCapture(int(source), cv2.CAP_MSMF)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            if not (cap.isOpened() and cap.read()[0]):
+                cap.release(); cap = None
+                print("[CAM] MSMF เปิดไม่ได้ -> ใช้ DirectShow (อาจได้แค่ 4 fps ที่ 720p)")
+        if cap is None:
+            cap = cv2.VideoCapture(int(source), cv2.CAP_DSHOW) if os.name == "nt" \
+                else cv2.VideoCapture(int(source))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         lock_camera(cap, exposure)
+        print(f"[CAM] {cap.get(cv2.CAP_PROP_FRAME_WIDTH):.0f}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT):.0f}  "
+              f"backend={cap.getBackendName()}")
         return cap, None
     ext = os.path.splitext(str(source))[1].lower()
     if ext in (".png", ".jpg", ".jpeg", ".bmp"):

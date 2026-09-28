@@ -204,10 +204,22 @@ def main():
     still_image = None
     cap = None
     if args.source.isdigit():
-        cap = cv2.VideoCapture(int(args.source), cv2.CAP_DSHOW) if os.name == "nt" \
-            else cv2.VideoCapture(int(args.source))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+        # v4.4: ต้องเปิดแบบเดียวกับ auto_main (MSMF + MJPG) ไม่งั้นสีที่ calibrate ต่างจากตอนแข่ง
+        #       (DirectShow ให้ YUY2 4 fps และโทนสีต่างจาก MJPG เล็กน้อย)
+        cap = None
+        if os.name == "nt":
+            cap = cv2.VideoCapture(int(args.source), cv2.CAP_MSMF)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            if not (cap.isOpened() and cap.read()[0]):
+                cap.release(); cap = None
+        if cap is None:
+            cap = cv2.VideoCapture(int(args.source), cv2.CAP_DSHOW) if os.name == "nt" \
+                else cv2.VideoCapture(int(args.source))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
         if not cap.isOpened():
             print(f"[ERROR] เปิดกล้อง index {args.source} ไม่ได้")
             return
