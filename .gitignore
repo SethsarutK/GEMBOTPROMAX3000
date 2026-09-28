@@ -5,3 +5,6 @@ pc/follow_log.csv
 .vscode/
 
 pc/gesture_recognizer.task
+
+pc/app_smoke_*.png
+pc/app_state.json
