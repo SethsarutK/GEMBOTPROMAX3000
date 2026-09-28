@@ -227,6 +227,7 @@ def run_real(args):
             gems_px, n_ambig = resolve_ambiguous(gems_px)
             gems_cm = [{"cm": calib.to_field(g["px"]), "class": g["class"], "area": g["area"], "px": g["px"]} for g in gems_px]
             gems_cm = nav.filter_outside_field(gems_cm)          # ตัดกำแพง/นอกสนาม
+            pl.raw_gems = list(gems_cm)                          # v4.5: ก่อนตัดตัวหุ่น -> planner ใช้ดู "ในปากมีอะไร"
             gems_cm = nav.filter_robot_blobs(gems_cm, pose, holding=pl.holding())   # v4.1: ตัดหินในปากตอนหนีบ/ตรวจผลด้วย
             gems_px = [g for g in gems_px if any(g["px"] == h["px"] for h in gems_cm)]   # วาดเฉพาะที่ไม่ใช่ตัวหุ่น
         fps_n += 1

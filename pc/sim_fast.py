@@ -225,6 +225,7 @@ class RealWorld(auto_main.SimWorld):
             for g in out:
                 g["cm"] = (g["cm"][0] + random.gauss(0, 0.4), g["cm"][1] + random.gauss(0, 0.4))
         out = nav.filter_outside_field(out)
+        self.last_raw = list(out)                     # v4.5: ก่อนตัดตัวหุ่น (ให้ planner ดูในปาก)
         return nav.filter_robot_blobs(out, pose, holding=holding)
 
 
@@ -275,6 +276,8 @@ def run(seed=3, ideal=False, verbose=True):
         pose = world.pose()
         holding = pl.holding() if hasattr(pl, "holding") else pl.bin_count > 0
         gems = world.seen_gems(pose, holding) if (ideal or frame % 3 == 1) else None
+        if gems is not None:
+            pl.raw_gems = world.last_raw
         pl.step(pose, "OK", gems)
         if CLOCK.t - t_last > 1000:
             break

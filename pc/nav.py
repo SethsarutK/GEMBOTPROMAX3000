@@ -215,8 +215,9 @@ def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
         dx, dy = tx - ax, ty - ay
         fwd = dx * math.cos(r) + dy * math.sin(r)
         lat = -dx * math.sin(r) + dy * math.cos(r)
-        if fwd <= tool_offset and abs(lat) <= 2 * tol:
-            return 0, 0, True                      # เลยที่นั่งแล้ว (เยื้องพอรับได้) = ถึง
+        early = getattr(C, "CREEP_EARLY_STOP_CM", 0.0)     # v4.5: หยุดก่อนถึงที่นั่ง ชดเชยหน่วงกล้อง/WiFi
+        if fwd <= tool_offset + early and abs(lat) <= 2 * tol:
+            return 0, 0, True                      # ถึงที่นั่ง (เยื้องพอรับได้) = ถึง
         if fwd <= tool_offset - 3.0:
             return 0, 0, True                      # เลยไปแล้วแน่ ๆ คืบต่อมีแต่ไถหิน/ไถวง -> หยุด
         if fwd < tool_offset + 12.0:

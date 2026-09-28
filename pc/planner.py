@@ -96,6 +96,13 @@ class Planner:
         self.creep_settle = None    # v4.1g: เวลาที่เริ่ม "นิ่งดูซ้ำ" ก่อนหนีบ
         self.zone_filled = set()    # v4.1h: สีของวงที่เราปล่อยหินไปแล้ว (ห้ามขับทับ/หมุนในวงพวกนี้)
         self.pre_pt = None          # v4.1j: จุดก่อนถึง approach (ให้มาถึงแบบหันหาเป้าแล้ว)
+        # v4.5
+        self.raw_gems = None        # blob หินทุกก้อน "ก่อนตัดตัวหุ่น" (auto_main/sim ใส่ให้) ไว้ดูว่าในปากมีอะไร; None = ไม่มีข้อมูล
+        self._pose_hist = []        # (t, ax, ay, th) ไว้ตรวจว่าหุ่นติด (สั่งล้อแล้วไม่ขยับ)
+        self.jaw_seen = {}          # นับสีที่เห็นในปากช่วง VERIFY_PICK
+        self.jaw_lost_t = None      # เวลาแรกที่ไม่เห็นหินในปากตอนลากไปวง
+        self.stall_return = "CHOOSE"
+        self.creep_t0_target = None # ตำแหน่งหินเป้าตอนเริ่มคืบ (ไว้จับว่าถูกไถ)
         self._last_cmd = (0, 0)
         self.path = []              # waypoint ที่เหลือ (cm) ตอน GO_APPROACH / GO_ZONE_AP
         self.path_t = 0.0
@@ -106,6 +113,40 @@ class Planner:
         self.state = s
         self.t_state = time.time()
         self.creep_settle = None
+        self._pose_hist = []                       # v4.5: เริ่มนับ stall ใหม่ทุกครั้งที่เปลี่ยน state
+        if s == "PICK_BACKOFF":
+            self.jaw_seen = {}
+        if s in ("GO_ZONE", "GO_ZONE_AP"):
+            self.jaw_lost_t = None
+        if s == "CREEP" and self.target is not None:
+            self.creep_t0_target = tuple(self.target["cm"])
+
+    # ---------- v4.5: หินในปาก / หุ่นติด ----------
+    def _jaw_class(self, ax, ay, th):
+        """สีของ blob ที่อยู่ตรงจุดปาก (จาก raw_gems ที่ยังไม่ตัดตัวหุ่น) หรือ None ถ้าปากว่าง"""
+        gp = nav.gripper_point(ax, ay, th)
+        r = getattr(C, "JAW_CHECK_R_CM", 4.5)
+        best, bd = None, r
+        for g in (self.raw_gems or []):
+            d = nav.dist(*g["cm"], *gp)
+            if d < bd:
+                best, bd = g["class"], d
+        return best
+
+    def _stalled(self, ax, ay, th):
+        """สั่งล้อ (ไม่ใช่ 0) แล้วตำแหน่ง/ทิศไม่เปลี่ยนนานเกิน STALL_S -> True"""
+        now = time.time()
+        vl, vr = self._last_cmd
+        if vl == 0 and vr == 0:
+            self._pose_hist = []
+            return False
+        self._pose_hist.append((now, ax, ay, th))
+        self._pose_hist = [h for h in self._pose_hist if now - h[0] <= getattr(C, "STALL_S", 0.7) + 0.2]
+        old = self._pose_hist[0]
+        if now - old[0] < getattr(C, "STALL_S", 0.7):
+            return False
+        moved = nav.dist(old[1], old[2], ax, ay) > 2.0 or abs(nav.norm_deg(th - old[3])) > 8.0
+        return not moved
 
     def elapsed(self):
         return 0.0 if self.t_start is None else time.time() - self.t_start
@@ -339,6 +380,12 @@ class Planner:
                 continue
             zx, zy = self.zones[g["class"]]
             cost = nav.dist(ax, ay, *g["cm"]) + 0.7 * nav.dist(*g["cm"], zx, zy)
+            # v4.5: ก้อนเดี่ยว ๆ ที่กระจายอยู่ต้องถูกเลือกก่อนกองเสมอ / ก้อนในกองแน่น (เพื่อนบ้าน >= 3) แพงขึ้นมาก
+            #       (ของจริง: พุ่งเข้ากลางกองแล้วมอเตอร์ดันไม่ไหว ค้าง)
+            if nb[id(g)] == 0:
+                cost -= 25
+            elif nb[id(g)] >= 3:
+                cost += 40 * (nb[id(g)] - 2)
             # "ปอกกองจากขอบนอกเข้าใน": หินที่ไกลจากใจกลางกอง (=ขอบ) ได้ cost ลดลง
             # ทำให้ถูกเลือกก่อนหินที่อยู่ลึกเข้าไปกลางกอง แม้จะอยู่ใกล้หุ่นกว่าก็ตาม
             if pile:
@@ -504,6 +551,30 @@ class Planner:
         if st in ("GO_APPROACH", "ALIGN", "CREEP", "CREEP_BACK", "BACKOFF"):
             self._rebind_target()            # v4.1: target ต้องเป็น track ที่ยังมีชีวิต
 
+        # ---- v4.5: หุ่นติด (สั่งล้อแล้วไม่ขยับ) -> ถอยแรงแล้วเลือกใหม่ ----
+        if st in ("GO_APPROACH", "GO_ZONE_AP", "CREEP", "REVERSE_IN", "BACKOFF", "CREEP_BACK", "BACKOFF_SKIP", "LEAVE") \
+                and self.in_state() > 0.8 and self._stalled(ax, ay, th):
+            self.log(f"STALL in {st} -> back off hard")
+            if st in ("GO_APPROACH", "CREEP", "CREEP_BACK", "BACKOFF") and self.target is not None:
+                self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
+            self.stall_return = "GO_ZONE" if self.bin_count > 0 else "CHOOSE"
+            self._go("STALL_BACK")
+            return "STALL"
+
+        # ---- v4.5: ลากหินไปวงอยู่ แต่กล้องไม่เห็นหินในปากต่อเนื่อง = หินหลุด -> กลับไปหยิบใหม่ ----
+        if st in ("GO_ZONE_AP", "ZONE_ALIGN") and self.bin_count > 0 and self.raw_gems is not None:
+            if self._jaw_class(ax, ay, th) is None:
+                if self.jaw_lost_t is None:
+                    self.jaw_lost_t = time.time()
+                elif time.time() - self.jaw_lost_t > getattr(C, "JAW_LOST_S", 1.0):
+                    self.log("gem dropped on the way (jaw empty) -> re-choose")
+                    self.bin_count = 0; self.color = None
+                    self._drive(0, 0)
+                    self._go("CHOOSE")
+                    return "gem lost"
+            else:
+                self.jaw_lost_t = None
+
         # ---- รอ sequence ของหุ่น (PICK/DUMP) ----
         if st in ("PICK", "DUMP"):
             wait = C.T_PICK_WAIT if st == "PICK" else C.T_DUMP_WAIT
@@ -585,6 +656,14 @@ class Planner:
                 self._drive(0, 0)
                 self._go("BACKOFF_SKIP")
                 return "CREEP target lost"
+            # v4.5: หินเป้าถูกดันเลื่อนไปจากจุดเริ่มคืบมาก = เรากำลังไถหินเข้ากอง (ของจริง: ดันจนมอเตอร์ค้าง)
+            if self.creep_t0_target is not None and \
+                    nav.dist(*self.target["cm"], *self.creep_t0_target) > getattr(C, "PUSH_ABORT_CM", 6.0):
+                self.log("target is being pushed away -> abort creep, blacklist")
+                self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
+                self._drive(0, 0)
+                self._go("BACKOFF_SKIP")
+                return "CREEP pushing"
             lost = False
             # v4.1: ใกล้แล้วแต่หินเยื้องข้างเกินก้ามจะกิน -> คืบต่อไปก็แค่ดันหิน ถอยตั้งหลักแล้วหันใหม่ (ไม่เกิน 2 ครั้ง/ก้อน)
             if (not lost and fwd < C.GRIP_REACH_CM + 6.0
@@ -641,6 +720,16 @@ class Planner:
             gp = nav.gripper_point(ax, ay, th)
             return f"CREEP gap={nav.dist(*gp, *self.target['cm']):.1f}cm"
 
+        if st == "STALL_BACK":
+            # v4.5: ถอยแรงกว่าปกติให้หลุดจากกอง แล้วกลับไปเลือกใหม่ (ถือหินอยู่ -> ไปวงต่อ)
+            v = getattr(C, "V_STALL_BACK", 45)
+            self._drive(-v, -v)
+            if self.in_state() > getattr(C, "T_STALL_BACK", 0.6):
+                self._drive(0, 0)
+                self._path_reset()
+                self._go(self.stall_return)
+            return "STALL_BACK"
+
         if st == "BACKOFF_SKIP":
             # v4.1: ถอยออกจากกอง (ก้ามมีก้อนอื่นขวาง) แล้วเลือกเป้าใหม่ ไม่หนีบ
             self._drive(-C.V_CREEP, -C.V_CREEP)
@@ -696,8 +785,38 @@ class Planner:
 
         if st == "VERIFY_PICK":
             self._drive(0, 0)
+            # v4.5: "แท็กหินในปาก" — ระหว่างรอ นับสีของ blob ที่อยู่ตรงจุดปากทุกเฟรม
+            jc = self._jaw_class(ax, ay, th)
+            self.jaw_seen[jc] = self.jaw_seen.get(jc, 0) + 1
             if self.in_state() < C.T_VERIFY:
                 return "VERIFY_PICK ..."
+            seen = {k: v for k, v in self.jaw_seen.items() if k is not None}
+            jaw = max(seen, key=seen.get) if seen and max(seen.values()) >= 2 else None
+            if self.raw_gems is None:
+                jaw = "?"                      # ไม่มีข้อมูลปาก (ผู้เรียกเก่า) -> ใช้ตรรกะเดิมด้านล่าง
+            elif jaw is None:
+                # ปากเปล่า -> ไม่นับว่าได้ ไม่ว่าหินเป้าจะหายไปไหน (เดิมหินถูกเขี่ยหลุด = "หาย" = นับว่าได้ -> วิ่งไปวงเปล่า ๆ)
+                self.retry += 1
+                self.log(f"jaw empty after pick (seen {dict(self.jaw_seen)}), retry {self.retry}")
+                if self.retry <= C.PICK_RETRY and self.tracker.still_there(self.pick_pos, self.target["class"], tol=8.0):
+                    self.wiggle = 0
+                    self._go("BACKOFF")
+                else:
+                    self.blacklist.append((tuple(self.pick_pos), self.target["class"]))
+                    self._go("CHOOSE")
+                return "pick FAILED (jaw empty)"
+            if jaw != "?" and jaw != self.target["class"] and jaw in self.zones and jaw not in C.SKIP_COLORS:
+                # ในปากเป็นสีอื่น (คว้าก้อนข้าง ๆ มา) -> ส่งไปวงของสีนั้นแทน ไม่เสียเที่ยว
+                self.log(f"jaw holds {jaw} (target was {self.target['class']}) -> deliver {jaw}")
+                self.color = jaw
+                self.bin_count += 1
+                self._go("GO_ZONE")
+                return "pick OK (other colour)"
+            if jaw == self.target["class"]:
+                self.bin_count += 1
+                self.log(f"picked {self.color}  bin={self.bin_count}  (jaw confirmed)")
+                self._go("GO_ZONE")
+                return "pick OK"
             # v4.1: tol 6 -> 3.5 (ในกองแน่น เพื่อนบ้านสีเดียวกันอยู่ใน 6 cm เสมอ -> เคยตัดสินว่า "ยังอยู่" ทั้งที่หยิบได้แล้ว
             #       แล้วหุ่นถือหินไปหยิบซ้ำ)  หินที่หนีบพลาดจริงจะอยู่ที่เดิมภายใน ~2-3 cm
             still = self.tracker.still_there(self.pick_pos, self.target["class"], tol=3.5)
