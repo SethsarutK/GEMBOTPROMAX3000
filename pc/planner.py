@@ -292,29 +292,38 @@ class Planner:
                 cost -= 10                    # ก้อนใหญ่จับง่ายกว่า
             # v4.1: มีหินก้อนอื่นขวางในแถบก้ามระหว่างจุดตั้งต้นกับเป้า -> ก้ามจะคว้าก้อนนั้นแทน (ผิดสี)
             #       ให้ cost แพงมาก (ยังเลือกได้ถ้าไม่มีทางเลือกอื่น)
-            ap_g = self._approach_point(ax, ay, g, pile)
-            th_g = nav.heading_to(*ap_g, *g["cm"])
-            if self._front_blockers(ap_g[0], ap_g[1], th_g, g, loose):
+            ap_g, blocked = self._approach_point(ax, ay, g, pile, loose)
+            if blocked:
                 cost += 200
-            cands.append((cost, g))
+            cands.append((cost, g, ap_g))
         if not cands:
             return None
         cands.sort(key=lambda c: c[0])
-        g = cands[0][1]
-        return g, self._approach_point(ax, ay, g, pile)
+        return cands[0][1], cands[0][2]
 
-    def _approach_point(self, ax, ay, g, pile):
-        # จุด approach: ถอยจากหินออก "ด้านนอกกอง" ระยะ reach + standoff
+    def _approach_point(self, ax, ay, g, pile, gems=None):
+        """จุด approach: ถอยจากหินออก "ด้านนอกกอง" ระยะ reach + standoff
+        v4.1: ลองหมุนทิศเข้าหา 0, ±30, ±60, ±90° รอบทิศนอกกอง เลือกทิศแรกที่ไม่มีก้อนอื่นขวางแถบก้าม
+              คืน (จุด, ยังมีก้อนขวางไหม)"""
         if pile and nav.dist(*g["cm"], *pile) > 1.0:
             dx, dy = g["cm"][0] - pile[0], g["cm"][1] - pile[1]
         else:
             dx, dy = ax - g["cm"][0], ay - g["cm"][1]
-        n = math.hypot(dx, dy) or 1.0
-        dx, dy = dx / n, dy / n
+        base = math.atan2(dy, dx)
         back = C.GRIP_REACH_CM + C.PILE_STANDOFF_CM
-        ap = (g["cm"][0] + dx * back, g["cm"][1] + dy * back)
-        # อย่าให้จุด approach ออกนอกสนาม
-        return (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
+        first = None
+        for off in (0, 30, -30, 60, -60, 90, -90):
+            a = base + math.radians(off)
+            ap = (g["cm"][0] + math.cos(a) * back, g["cm"][1] + math.sin(a) * back)
+            ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))   # อย่าออกนอกสนาม
+            if first is None:
+                first = ap
+            if gems is None:
+                return ap, False
+            th_g = nav.heading_to(*ap, *g["cm"])
+            if not self._front_blockers(ap[0], ap[1], th_g, g, gems):
+                return ap, False
+        return first, True
 
     def _approach_for(self, ax, ay, g):
         """จุดตั้งต้นหน้าหิน g: ถอยจากหินมาทางหุ่น reach + standoff (ใช้ตอนเล็งก้อนที่ถูกดันใหม่)"""
@@ -470,6 +479,15 @@ class Planner:
                 # v4.1: มีหินก้อนอื่นอยู่ในแถบก้ามด้วย -> หนีบไปก็ได้ก้อนผิด (ผิดสี) ถอยออกแล้วเลือกใหม่
                 #       (ครั้งที่ 2 ของก้อนเดิม -> blacklist ไปเลย)
                 blockers = self._front_blockers(ax, ay, th, self.target, gems)
+                if blockers and not lost:
+                    # v4.1: ถ้าก้อนที่ขวางอยู่ในโซนก้ามพอดี และเป็นสีที่มีวง -> หนีบก้อนนั้นแทนเลย (ทุกสีส่งได้ ไม่เสียเที่ยว)
+                    b = min(blockers, key=lambda g: self._rel_to_robot(ax, ay, th, g["cm"])[0])
+                    if (b["class"] in self.zones and b["class"] not in C.SKIP_COLORS
+                            and self._in_jaw_zone(ax, ay, th, b["cm"]) and self.bin_count == 0
+                            and not self._front_blockers(ax, ay, th, b, gems)):
+                        self.log(f"jaw has {b['class']} in front of target -> grab it instead")
+                        self.target, self.color = b, b["class"]
+                        blockers = []
                 if blockers and not lost:
                     self.contested += 1
                     self.log(f"jaw contested by {len(blockers)} other gem(s) -> skip target ({self.contested})")
