@@ -142,9 +142,14 @@ class RealWorld(auto_main.SimWorld):
                                   "class": g["class"], "area": g["area"]})
             self.bin = []
             best = min(self.gems, key=lambda g: nav.dist(gx, gy, *g["cm"]), default=None)
-            tol = 4.0 if self.ideal else 3.0
             self.last_pick_d = nav.dist(gx, gy, *best["cm"]) if best else 99
-            if best and self.last_pick_d < tol and random.random() < 0.9:
+            if self.ideal:
+                ok = best is not None and self.last_pick_d < 4.0
+            else:
+                # ก้ามปิดจะกวาดหินที่อยู่ "ระหว่างปลายก้ามกับที่นั่ง" (fwd GRIP_REACH-4..+2.5, เยื้อง <= 3) เข้ามาที่นั่ง
+                fwd, lat = self._rel(*best["cm"]) if best else (99, 99)
+                ok = (C.GRIP_REACH_CM - 4.0) <= fwd <= (C.GRIP_REACH_CM + 2.5) and abs(lat) <= 3.0
+            if ok and random.random() < 0.9:
                 self.gems.remove(best); self.bin.append(best)
         elif self.pending == "dump":
             gx, gy = nav.gripper_point(self.x, self.y, self.th)
@@ -201,12 +206,14 @@ def run(seed=3, ideal=False, verbose=True):
     verdict = {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "pick_d": []}
     def log(s):
         # ให้คะแนนการตัดสินของ VERIFY_PICK เทียบกับความจริงในโลก sim
+        held_ok = bool(world.bin) and pl.color is not None and world.bin[-1]["class"] == pl.color
+        held_wrong = bool(world.bin) and not held_ok
         if s.startswith("picked"):
-            verdict["tp" if world.bin else "fp"] += 1
-            s += f"   [sim: {'จริง' if world.bin else 'ผิด! ปากเปล่า'} d={world.last_pick_d:.1f}]"
+            verdict["tp" if held_ok else "fp"] += 1
+            s += f"   [sim: {'จริง' if held_ok else ('ผิด! ในปากเป็นสีอื่น' if held_wrong else 'ผิด! ปากเปล่า')} d={world.last_pick_d:.1f}]"
         elif "still there" in s or "pushed" in s:
-            verdict["fn" if world.bin else "tn"] += 1
-            s += f"   [sim: {'ผิด! หินอยู่ในปาก' if world.bin else 'จริง'} d={world.last_pick_d:.1f}]"
+            verdict["fn" if held_ok else "tn"] += 1
+            s += f"   [sim: {'ผิด! หินสีถูกอยู่ในปาก' if held_ok else ('จริง (คว้าสีอื่นมา)' if held_wrong else 'จริง')} d={world.last_pick_d:.1f}]"
         if s.startswith("creep -> pick"):
             pass
         lines.append(s)
@@ -234,7 +241,8 @@ def run(seed=3, ideal=False, verbose=True):
              "giveup": sum(1 for l in lines if "give up" in l),
              "timeout": sum(1 for l in lines if "timeout" in l),
              "left_in_bin": len(world.bin),
-             "verify TP/FP/TN/FN": (verdict["tp"], verdict["fp"], verdict["tn"], verdict["fn"])}
+             "verify TP/FP/TN/FN": (verdict["tp"], verdict["fp"], verdict["tn"], verdict["fn"]),
+             "wrong_colour_grabs": sum(1 for l in lines if "คว้าสีอื่น" in l or "สีอื่น" in l)}
     return stats, lines
 
 

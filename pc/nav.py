@@ -204,6 +204,8 @@ def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
         lat = -dx * math.sin(r) + dy * math.cos(r)
         if fwd <= tool_offset and abs(lat) <= 2 * tol:
             return 0, 0, True                      # เลยที่นั่งแล้ว (เยื้องพอรับได้) = ถึง
+        if fwd <= tool_offset - 3.0:
+            return 0, 0, True                      # เลยไปแล้วแน่ ๆ คืบต่อมีแต่ไถหิน/ไถวง -> หยุด
         if fwd < tool_offset + 12.0:
             v = C.V_CREEP
             corr = C.TURN_SIGN * clamp(lat * 2.5, -8, 8)   # เยื้อง 1 cm -> ต่างล้อ 5

@@ -88,6 +88,9 @@ class Planner:
         self.lost_since = None
         self.blacklist = []         # หินที่หยิบไม่ได้ (cm, class)
         self.pick_pos = None
+        self.pick_nearby = 0        # v4.1: จำนวนหินสีเป้ารอบจุดหนีบ ตอนสั่ง PICK
+        self.contested = 0          # v4.1: ก้อนเป้าปัจจุบันโดน "ก้ามมีก้อนอื่นขวาง" มากี่ครั้ง
+        self.contested_at = None
         self._last_cmd = (0, 0)
         self.path = []              # waypoint ที่เหลือ (cm) ตอน GO_APPROACH / GO_ZONE_AP
         self.path_t = 0.0
@@ -175,6 +178,24 @@ class Planner:
         if best is not None:
             self.target = best
 
+    def _front_blockers(self, ax, ay, th, target, gems):
+        """v4.1: หินก้อนอื่น (สีใดก็ได้) ที่อยู่ 'ในแถบก้าม' หน้าหุ่นก่อนถึง/ข้างเป้า
+        -> ก้ามจะกวาดก้อนนั้นเข้ามาแทน (sim: หนีบผิดสี 15 ครั้ง/รอบในกองแน่น)"""
+        tf, tl = self._rel_to_robot(ax, ay, th, target["cm"])
+        out = []
+        for g in gems:
+            if g is target or (g["class"] == target["class"] and nav.dist(*g["cm"], *target["cm"]) < 1.0):
+                continue
+            f, l = self._rel_to_robot(ax, ay, th, g["cm"])
+            if C.ROBOT_BODY_FRONT_CM < f < tf + 1.0 and abs(l) < 4.0:
+                out.append(g)
+        return out
+
+    def _count_same_near(self, cm, cls, within):
+        """นับ track สีเดียวกันที่ยังเห็นอยู่ (miss=0) ในรัศมี within รอบจุด cm"""
+        return sum(1 for t in self.tracker.tracks
+                   if t["class"] == cls and t["miss"] == 0 and nav.dist(*t["cm"], *cm) <= within)
+
     def _rel_to_robot(self, ax, ay, th, cm):
         r = math.radians(th)
         dx, dy = cm[0] - ax, cm[1] - ay
@@ -260,11 +281,20 @@ class Planner:
                 cost -= 40 * (len(C.COLOR_PRIORITY) - C.COLOR_PRIORITY.index(g["class"]))
             if g["area"] >= C.BIG_GEM_AREA_PX:
                 cost -= 10                    # ก้อนใหญ่จับง่ายกว่า
+            # v4.1: มีหินก้อนอื่นขวางในแถบก้ามระหว่างจุดตั้งต้นกับเป้า -> ก้ามจะคว้าก้อนนั้นแทน (ผิดสี)
+            #       ให้ cost แพงมาก (ยังเลือกได้ถ้าไม่มีทางเลือกอื่น)
+            ap_g = self._approach_point(ax, ay, g, pile)
+            th_g = nav.heading_to(*ap_g, *g["cm"])
+            if self._front_blockers(ap_g[0], ap_g[1], th_g, g, loose):
+                cost += 200
             cands.append((cost, g))
         if not cands:
             return None
         cands.sort(key=lambda c: c[0])
         g = cands[0][1]
+        return g, self._approach_point(ax, ay, g, pile)
+
+    def _approach_point(self, ax, ay, g, pile):
         # จุด approach: ถอยจากหินออก "ด้านนอกกอง" ระยะ reach + standoff
         if pile and nav.dist(*g["cm"], *pile) > 1.0:
             dx, dy = g["cm"][0] - pile[0], g["cm"][1] - pile[1]
@@ -275,8 +305,7 @@ class Planner:
         back = C.GRIP_REACH_CM + C.PILE_STANDOFF_CM
         ap = (g["cm"][0] + dx * back, g["cm"][1] + dy * back)
         # อย่าให้จุด approach ออกนอกสนาม
-        ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
-        return g, ap
+        return (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
 
     def _approach_for(self, ax, ay, g):
         """จุดตั้งต้นหน้าหิน g: ถอยจากหินมาทางหุ่น reach + standoff (ใช้ตอนเล็งก้อนที่ถูกดันใหม่)"""
@@ -378,6 +407,10 @@ class Planner:
             self.color = self.target["class"]
             self.retry = 0
             self.wiggle = 0
+            # v4.1: นับ "ก้ามโดนขวาง" ต่อก้อน (ก้อนเดิม = ตำแหน่งเดิมภายใน 4 cm)
+            if self.contested_at is None or nav.dist(*self.contested_at, *self.target["cm"]) > 4.0:
+                self.contested = 0
+            self.contested_at = tuple(self.target["cm"])
             self._path_reset()
             self._go("GO_APPROACH")
             return f"target {self.color} at {tuple(round(v) for v in self.target['cm'])}"
@@ -424,13 +457,33 @@ class Planner:
             self._drive(vl, vr)
             if done or in_jaw or lost or self.in_state() > C.T_CREEP_TIMEOUT:
                 why = "reach" if done else ("in jaw" if in_jaw else ("track lost" if lost else "timeout"))
-                self.log(f"creep -> pick ({why})")
                 self._drive(0, 0)
+                # v4.1: มีหินก้อนอื่นอยู่ในแถบก้ามด้วย -> หนีบไปก็ได้ก้อนผิด (ผิดสี) ถอยออกแล้วเลือกใหม่
+                #       (ครั้งที่ 2 ของก้อนเดิม -> blacklist ไปเลย)
+                blockers = self._front_blockers(ax, ay, th, self.target, gems)
+                if blockers and not lost:
+                    self.contested += 1
+                    self.log(f"jaw contested by {len(blockers)} other gem(s) -> skip target ({self.contested})")
+                    if self.contested >= 2:
+                        self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
+                    self._go("BACKOFF_SKIP")
+                    return "CREEP contested"
+                self.log(f"creep -> pick ({why})")
                 self.pick_pos = tuple(self.target["cm"])   # จำตำแหน่งหินก่อนหนีบ ไว้เช็คหลังถอย
+                # v4.1: จำว่ารอบ ๆ จุดหนีบมีหินสีนี้กี่ก้อน (ก้ามอาจคว้า "ก้อนข้าง ๆ สีเดียวกัน" แทนก้อนเป้า)
+                self.pick_nearby = self._count_same_near(self.pick_pos, self.target["class"], 10.0)
                 self.link.pick()
                 self._go("PICK")
             gp = nav.gripper_point(ax, ay, th)
             return f"CREEP gap={nav.dist(*gp, *self.target['cm']):.1f}cm"
+
+        if st == "BACKOFF_SKIP":
+            # v4.1: ถอยออกจากกอง (ก้ามมีก้อนอื่นขวาง) แล้วเลือกเป้าใหม่ ไม่หนีบ
+            self._drive(-C.V_CREEP, -C.V_CREEP)
+            if self.in_state() > 1.0:
+                self._drive(0, 0)
+                self._go("CHOOSE")
+            return "BACKOFF_SKIP"
 
         if st == "CREEP_BACK":
             # v4.1: ถอยสั้น ๆ ให้หินกลับมาอยู่หน้าปากไกลพอ แล้วกลับไป ALIGN หันใหม่
@@ -462,6 +515,11 @@ class Planner:
                     and nav.dist(*self.target["cm"], *self.pick_pos) > 6.0 \
                     and not self._in_jaw_zone(ax, ay, th, self.target["cm"]):
                 pushed = self.target
+            if still and self._count_same_near(self.pick_pos, self.target["class"], 10.0) < self.pick_nearby:
+                # v4.1: ก้อนเป้ายังอยู่ แต่หินสีเดียวกันรอบ ๆ หายไป 1 ก้อน = ก้ามคว้าก้อนข้าง ๆ มาแทน (สีถูกอยู่ดี)
+                #       ถ้าลองใหม่ PICK จะเปิดปากทำหินหล่นแล้ววนซ้ำ 3 รอบ -> นับว่าได้ แล้วไปส่ง
+                self.log("target still there but a same-colour neighbour vanished -> assume grabbed neighbour")
+                still = False
             if still or pushed is not None:
                 self.retry += 1
                 if pushed is not None:
