@@ -165,7 +165,24 @@ class Planner:
         self.t_start = time.time()
         self.delivered = 0
         self.bin_count = 0
+        self.scatter_done = False
+        self.scatter_pile = None
         self._go("CHOOSE")
+
+    # ---------- v4.6: เปิดเกมพุ่งชนกองให้กระจาย ----------
+    def _scatter_wanted(self, gems):
+        """True ถ้ายังไม่เคยพุ่ง และกองกลางแน่นพอ (>= SCATTER_MIN_GEMS ในรัศมี 20 cm รอบใจกลางกอง)"""
+        if self.scatter_done or not getattr(C, "SCATTER_ENABLED", False):
+            return False
+        loose = [g for g in gems if self._in_zone(g["cm"]) is None]
+        pile = self._pile_center(loose)
+        if pile is None:
+            return False
+        n = sum(1 for g in loose if nav.dist(*g["cm"], *pile) <= 20.0)
+        if n < getattr(C, "SCATTER_MIN_GEMS", 12):
+            return False
+        self.scatter_pile = pile
+        return True
 
     def stop(self):
         self.link.stop()
@@ -584,6 +601,56 @@ class Planner:
             return f"{st} waiting robot busy={self.link.busy}"
 
         # =========================================================
+        # ---- v4.6: รอบแรกพุ่งผ่ากลางกองด้วยความเร็วสูงให้หินกระจาย แล้วค่อยเริ่มเก็บ ----
+        if st == "CHOOSE" and self.bin_count == 0 and self._scatter_wanted(gems):
+            self.scatter_done = True                       # ทำครั้งเดียวต่อเกม
+            self.log(f"SCATTER: pile at ({self.scatter_pile[0]:.0f},{self.scatter_pile[1]:.0f}) -> charge!")
+            self._go("SCATTER_AIM")
+            st = "SCATTER_AIM"
+
+        if st == "SCATTER_AIM":
+            want = nav.heading_to(ax, ay, *self.scatter_pile)
+            vl, vr, done = nav.turn_to_pulsed(ax, ay, th, want, self.in_state())
+            if done or self.in_state() > 6.0:
+                self._drive(0, 0)
+                self._go("SCATTER_RUN")
+                return "SCATTER aim ok -> run"
+            self._drive(vl, vr)
+            return f"SCATTER aim err={nav.norm_deg(want - th):.0f}"
+
+        if st == "SCATTER_RUN":
+            v = getattr(C, "V_SCATTER", 75)
+            fwd, lat = self._rel_to_robot(ax, ay, th, self.scatter_pile)
+            over = getattr(C, "SCATTER_OVER_CM", 12)
+            # เดินตรงเข้ากอง แก้ทิศเล็กน้อยระหว่างทาง (ก่อนถึงกอง) ไม่ให้เบี้ยว
+            corr = 0.0
+            if fwd > 8:
+                err = nav.norm_deg(nav.heading_to(ax, ay, *self.scatter_pile) - th)
+                corr = max(-15.0, min(15.0, C.TURN_SIGN * err * C.K_TURN * 0.6))
+            vl, vr = nav.steer(v, corr)
+            passed = fwd < -over
+            wall = not (8 <= ax <= nav.FIELD_W_CM - 8 and 8 <= ay <= nav.FIELD_H_CM - 8)
+            stalled = self.in_state() > 0.8 and self._stalled(ax, ay, th)
+            timeout = self.in_state() > getattr(C, "T_SCATTER_MAX", 4.0)
+            if passed or wall or stalled or timeout:
+                why = "passed" if passed else "wall" if wall else "stall" if stalled else "timeout"
+                self.log(f"SCATTER run end ({why}) fwd={fwd:.0f}")
+                self._drive(0, 0)
+                self._go("SCATTER_BACK")
+                return f"SCATTER done ({why})"
+            self._drive(vl, vr)
+            return f"SCATTER charge fwd={fwd:.0f} lat={lat:.0f}"
+
+        if st == "SCATTER_BACK":
+            v = getattr(C, "V_STALL_BACK", 45)
+            self._drive(-v, -v)                             # ถอยออกจากกองสั้น ๆ ให้กล้องเห็นหินรอบตัวชัด
+            if self.in_state() > 1.2:
+                self._drive(0, 0)
+                self.tracker = GemTracker()                 # ล้าง track เก่า หินย้ายที่หมดแล้ว
+                self._go("CHOOSE")
+                return "SCATTER back done -> choose"
+            return "SCATTER backing"
+
         if st == "CHOOSE":
             self._drive(0, 0)
             res = self._choose(ax, ay, gems)
