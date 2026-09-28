@@ -93,6 +93,7 @@ class Planner:
         self.contested_at = None
         self.creep_settle = None    # v4.1g: เวลาที่เริ่ม "นิ่งดูซ้ำ" ก่อนหนีบ
         self.zone_filled = set()    # v4.1h: สีของวงที่เราปล่อยหินไปแล้ว (ห้ามขับทับ/หมุนในวงพวกนี้)
+        self.pre_pt = None          # v4.1j: จุดก่อนถึง approach (ให้มาถึงแบบหันหาเป้าแล้ว)
         self._last_cmd = (0, 0)
         self.path = []              # waypoint ที่เหลือ (cm) ตอน GO_APPROACH / GO_ZONE_AP
         self.path_t = 0.0
@@ -194,6 +195,14 @@ class Planner:
                 out.append(g)
         return out
 
+    def _pre_point(self, ap, target_cm, back_cm=10.0):
+        """v4.1j: จุดก่อนถึงจุดตั้งต้น ถอยจาก ap ไปทางตรงข้ามเป้า back_cm
+        -> หุ่นมาถึง ap โดยหันหน้าหาเป้าอยู่แล้ว ALIGN แทบไม่ต้องหมุน (ก้ามอ้าไม่กวาดหิน/วงรอบ ๆ)"""
+        dx, dy = target_cm[0] - ap[0], target_cm[1] - ap[1]
+        n = math.hypot(dx, dy) or 1.0
+        p = (ap[0] - dx / n * back_cm, ap[1] - dy / n * back_cm)
+        return (min(max(p[0], 12), 210 - 12), min(max(p[1], 12), 120 - 12))
+
     def _count_same_near(self, cm, cls, within):
         """นับ track สีเดียวกันที่ยังเห็นอยู่ (miss=0) ในรัศมี within รอบจุด cm"""
         return sum(1 for t in self.tracker.tracks
@@ -231,7 +240,9 @@ class Planner:
         """v4.1h: ถ้าจุด (approach) อยู่ในวงที่มีหินแล้ว ให้เลื่อนออกไปนอกวง + รัศมีตัวหุ่น"""
         x, y = pt
         for zx, zy in self._filled_zones(gems):
-            need = self.zr + C.ROBOT_BODY_R_CM
+            # v4.1j: ตอนหมุนตัว (ALIGN) ปลายก้ามที่อ้ากว้างกวาดเป็นวงรัศมี ~GRIP_REACH+7 รอบเพลา
+            #        ถ้าเพลาห่างวงแค่ zr+BODY_R ก้ามจะกวาดหินในวงออก (sim: สาเหตุอันดับ 1 ของหินหลุดวง)
+            need = self.zr + max(C.ROBOT_BODY_R_CM, C.GRIP_REACH_CM + 2.0)
             d = nav.dist(x, y, zx, zy)
             if d < need:
                 ux, uy = ((x - zx) / d, (y - zy) / d) if d > 0.1 else (1.0, 0.0)
@@ -323,6 +334,8 @@ class Planner:
             ap_g, blocked = self._approach_point(ax, ay, g, pile, loose)
             if blocked:
                 cost += 200
+            # v4.1j: ระยะที่ต้องเดินจริงคือ "ถึงจุดตั้งต้น" ไม่ใช่ถึงหิน (จุดตั้งต้นอาจอยู่คนละฝั่งกอง = เดินอ้อม 60+ cm)
+            cost += nav.dist(ax, ay, *ap_g) - nav.dist(ax, ay, *g["cm"])
             cands.append((cost, g, ap_g))
         if not cands:
             return None
@@ -340,7 +353,10 @@ class Planner:
         base = math.atan2(dy, dx)
         back = C.GRIP_REACH_CM + C.PILE_STANDOFF_CM
         first = None
-        for off in (0, 30, -30, 60, -60, 90, -90):
+        zones_keep = self._filled_zones(gems) if gems is not None else []
+        need = self.zr + max(C.ROBOT_BODY_R_CM, C.GRIP_REACH_CM + 2.0)
+        best = None
+        for off in (0, 30, -30, 60, -60, 90, -90, 120, -120):
             a = base + math.radians(off)
             ap = (g["cm"][0] + math.cos(a) * back, g["cm"][1] + math.sin(a) * back)
             ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))   # อย่าออกนอกสนาม
@@ -348,9 +364,17 @@ class Planner:
                 first = ap
             if gems is None:
                 return ap, False
+            # v4.1j: จุดยืน/แนวหมุนต้องไม่ล้ำวงที่มีหินแล้ว (ก้ามอ้ากวาดหินในวงตอน ALIGN) -> ลองมุมอื่นแทนการดันจุดออก
+            if any(nav.dist(*ap, zx, zy) < need for zx, zy in zones_keep):
+                continue
             th_g = nav.heading_to(*ap, *g["cm"])
             if not self._front_blockers(ap[0], ap[1], th_g, g, gems):
-                return ap, False
+                # v4.1j: ในบรรดามุมที่ "โล่ง" เลือกจุดที่หุ่นเดินไปถึงใกล้ที่สุด (มุมนอกกองได้แต้มต่อ 8 cm)
+                score = nav.dist(ax, ay, *ap) + abs(off) / 30.0 * 8.0
+                if best is None or score < best[0]:
+                    best = (score, ap)
+        if best is not None:
+            return best[1], False
         return first, True
 
     def _approach_for(self, ax, ay, g):
@@ -375,13 +399,25 @@ class Planner:
         pile_r = min(pile_r, 30.0)
         ox, oy = (ax, ay) if ax is not None else pile
         dx, dy = zx - ox, zy - oy               # ทิศจากหุ่นไปหาวง (หน้าหุ่นจะชี้ทางนี้)
-        n = math.hypot(dx, dy) or 1.0
-        dx, dy = dx / n, dy / n
+        base = math.atan2(dy, dx)
         back = self.zr + C.ZONE_STANDOFF_CM + C.GRIP_REACH_CM
-        ap = (zx - dx * back, zy - dy * back)
-        if nav.dist(*ap, *pile) < pile_r + C.ROBOT_BODY_R_CM:
-            back = self.zr + C.GRIP_REACH_CM      # จุดยืนทับกอง -> ยืนชิดขอบวงเลย
-            ap = (zx - dx * back, zy - dy * back)
+        # v4.1j: จุดยืนทับกอง -> เดิมตัด standoff ยืนชิดวง (ก้ามอ้ากวาดหินในวงตอน ZONE_ALIGN)
+        #        ตอนนี้หมุนทิศเข้าวง ±30/60/90° หาจุดยืนที่พ้นกองแทน โดยคง standoff เต็ม
+        chosen = None
+        for off in (0, 30, -30, 60, -60, 90, -90):
+            a = base + math.radians(off)
+            cand = (zx - math.cos(a) * back, zy - math.sin(a) * back)
+            inside = not (12 <= cand[0] <= 210 - 12 and 12 <= cand[1] <= 120 - 12)
+            if inside or nav.dist(*cand, *pile) < pile_r + C.ROBOT_BODY_R_CM:
+                continue
+            chosen = (cand, a)
+            break
+        if chosen is None:
+            a = base
+            back = self.zr + C.GRIP_REACH_CM      # ไม่มีทิศไหนพ้นกองเลย -> ยืนชิดขอบวง (เหมือนเดิม)
+            chosen = ((zx - math.cos(a) * back, zy - math.sin(a) * back), a)
+        ap, a = chosen
+        dx, dy = math.cos(a), math.sin(a)
         ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
         # v4.1h: จุดยืนหน้าวงต้องไม่ไปตกในวงสีอื่นที่มีหินแล้ว
         others = [g for g in gems if self._in_zone(g["cm"]) not in (None, color)]
@@ -474,11 +510,24 @@ class Planner:
             if self.contested_at is None or nav.dist(*self.contested_at, *self.target["cm"]) > 4.0:
                 self.contested = 0
             self.contested_at = tuple(self.target["cm"])
+            self.pre_pt = self._pre_point(self.approach, self.target["cm"])   # v4.1j
             self._path_reset()
             self._go("GO_APPROACH")
             return f"target {self.color} at {tuple(round(v) for v in self.target['cm'])}"
 
         if st == "GO_APPROACH":
+            # v4.1j: ไปจุดก่อนถึง (pre_pt) ก่อน แล้วค่อยเดินตรงเข้า approach -> ถึงแล้วหันหาเป้าอยู่แล้ว
+            if self.pre_pt is not None:
+                if nav.dist(ax, ay, *self.pre_pt) <= C.PATH_WP_TOL_CM:
+                    self.pre_pt = None
+                    self._path_reset()
+                else:
+                    vl, vr, _ = self._go_via(ax, ay, th, self.pre_pt, gems, exclude=self.target)
+                    self._drive(vl, vr)
+                    if self.in_state() > C.T_STATE_TIMEOUT:
+                        self.log("approach timeout -> re-choose")
+                        self._go("CHOOSE")
+                    return f"GO_APPROACH(pre) d={nav.dist(ax, ay, *self.pre_pt):.0f}cm"
             vl, vr, done = self._go_via(ax, ay, th, self.approach, gems, exclude=self.target)
             self._drive(vl, vr)
             if done:
@@ -548,7 +597,7 @@ class Planner:
                     b = min(blockers, key=lambda g: self._rel_to_robot(ax, ay, th, g["cm"])[0])
                     if (b["class"] in self.zones and b["class"] not in C.SKIP_COLORS
                             and self._in_jaw_zone(ax, ay, th, b["cm"]) and self.bin_count == 0
-                            and not self._front_blockers(ax, ay, th, b, gems)):
+                            and not [g for g in self._front_blockers(ax, ay, th, b, gems) if g is not self.target]):
                         self.log(f"jaw has {b['class']} in front of target -> grab it instead")
                         self.target, self.color = b, b["class"]
                         blockers = []
@@ -646,11 +695,22 @@ class Planner:
             ap, self.dump_pt, self.zone_heading = self._zone_approach(self.color, gems, ax, ay)
             self.zone_before = self._count_in_zone(gems, self.color)
             self.zone_ap = ap
+            self.pre_pt = self._pre_point(ap, self.zones[self.color])          # v4.1j
             self._path_reset()
             self._go("GO_ZONE_AP")
             return "GO_ZONE"
 
         if st == "GO_ZONE_AP":
+            if self.pre_pt is not None:                                         # v4.1j
+                if nav.dist(ax, ay, *self.pre_pt) <= C.PATH_WP_TOL_CM:
+                    self.pre_pt = None
+                    self._path_reset()
+                else:
+                    vl, vr, _ = self._go_via(ax, ay, th, self.pre_pt, gems)
+                    self._drive(vl, vr)
+                    if self.in_state() > C.T_STATE_TIMEOUT:
+                        self._go("ZONE_ALIGN")
+                    return f"GO_ZONE_AP(pre) d={nav.dist(ax, ay, *self.pre_pt):.0f}cm"
             vl, vr, done = self._go_via(ax, ay, th, self.zone_ap, gems)
             self._drive(vl, vr)
             if done:

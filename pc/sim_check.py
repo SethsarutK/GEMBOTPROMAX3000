@@ -32,13 +32,20 @@ def analyze(seed, speed, ideal=False):
     return st, issues
 
 if __name__ == "__main__":
-    for label, speed, ideal in (("à¸›à¸à¸•à¸´", 0.6, False), ("à¸¡à¸­à¹€à¸•à¸­à¸£à¹Œà¸Šà¹‰à¸² 40%", 0.36, False), ):
+    for label, speed, ideal in (("motor normal", 0.6, False), ("motor slow 40%", 0.36, False)):
         print(f"===== {label} =====")
-        tot = 0; bad = 0
+        tot = 0; bad = 0; hits = []; exit_by = {}; score = 0
         for seed in range(3, 15):
             st, issues = analyze(seed, speed, ideal)
             tot += st["delivered"]
             flag = "  <-- " + "; ".join(issues) if issues else ""
             if issues: bad += 1
-            print(f"seed {seed:2d}: delivered {st['delivered']:2d}  picked {st['picked']:2d}  still {st['still']:2d}  verify {st['verify TP/FP/TN/FN']}  wrong {st['wrong_colour_grabs']}{flag}")
-        print(f"TOTAL {tot} / 12 runs (avg {tot/12:.1f})   runs with issues: {bad}")
+            for k, v in st["zone_exit_by"].items():
+                exit_by[k] = exit_by.get(k, 0) + v
+            score += st["score"]
+            print(f"seed {seed:2d}: delivered {st['delivered']:2d} SCORE {st['score']:2d}  picked {st['picked']:2d}  still {st['still']:2d}  verify {st['verify TP/FP/TN/FN']}  wrong {st['wrong_colour_grabs']}"
+                  f"  | hit body {st['hit_body']} seat {st['hit_seat']} jaw {st['hit_jaw']} zone_exit {st['zone_exits']}{flag}")
+            hits.append(st)
+        hb = sum(s['hit_body'][0] for s in hits); hj = sum(s['hit_jaw'][0] for s in hits); ze = sum(s['zone_exits'] for s in hits)
+        print(f"TOTAL delivered {tot}  SCORE {score} / 12 runs (avg {score/12:.1f})   runs with issues: {bad}   | body-hit gems {hb}  jaw-hit gems {hj}  zone exits {ze}")
+        print("zone exits by state/part:", dict(sorted(exit_by.items(), key=lambda kv: -kv[1])))

@@ -65,6 +65,21 @@ class RealWorld(auto_main.SimWorld):
                 self.gems.append({"cm": p, "class": c, "area": 600 if big else 300})
         self.pushes = 0
         self.last_pick_d = 99
+        self.hit_cm = {"body": 0.0, "seat": 0.0, "jaw": 0.0}     # ระยะรวมที่หินถูกดัน แยกตามส่วนที่ชน
+        self.hit_ids = {"body": set(), "seat": set(), "jaw": set()}
+        self.zone_exits = 0                                       # หิน (สีใดก็ได้) ถูกดันจนหลุดออกจากวง
+        self.zone_exit_by = {}                                    # แยกตาม state ของ planner / ส่วนที่ชน
+        self.cur_state = "?"
+
+    def score(self):
+        """คะแนนจริง = หินสี X ที่อยู่ในวง X ตอนจบ (ไม่ใช่ที่ planner นับสะสม)"""
+        return sum(1 for g in self.gems if self._zone_of(g["cm"]) == g["class"])
+
+    def _zone_of(self, cm):
+        for name, (zx, zy) in self.zones.items():
+            if nav.dist(*cm, zx, zy) <= 10.0:
+                return name
+        return None
 
     # --- มอเตอร์ ---
     def _eff(self, vl, vr):
@@ -109,20 +124,30 @@ class RealWorld(auto_main.SimWorld):
         """ตัวหุ่น (วงรัศมี BODY_R) และปาก (ที่นั่งหิน fwd=GRIP_REACH, ก้ามกว้าง +-4.5) ดันหิน"""
         for g in self.gems:
             fwd, lat = self._rel(*g["cm"])
-            moved = False
+            moved = None
             # ตัวหุ่น: หินที่อยู่ในวงตัวหุ่น (ยกเว้นด้านหน้าที่เป็นก้าม) ถูกดันออกจากศูนย์กลาง
             d = math.hypot(fwd, lat)
             if d < C.ROBOT_BODY_R_CM + self.GEM_R and not (fwd > C.ROBOT_BODY_FRONT_CM and abs(lat) < 6):
                 k = (C.ROBOT_BODY_R_CM + self.GEM_R) / (d or 0.1)
-                fwd, lat = fwd * k, lat * k; moved = True
+                fwd, lat = fwd * k, lat * k; moved = "body"
             # ที่นั่งในปาก: หินเข้ามาลึกกว่า GRIP_REACH ไม่ได้ -> ถูกดันไปข้างหน้า
             elif abs(lat) < 4.5 and C.ROBOT_BODY_FRONT_CM < fwd < C.GRIP_REACH_CM:
-                fwd = C.GRIP_REACH_CM; moved = True
+                fwd = C.GRIP_REACH_CM; moved = "seat"
             # ปลายก้ามสองข้าง (fwd GRIP_REACH-2 .. GRIP_REACH+6, lat 4.5..7): ดันออกข้าง
             elif C.GRIP_REACH_CM - 2 < fwd < C.GRIP_REACH_CM + 6 and 4.5 <= abs(lat) < 7:
-                lat = math.copysign(7.0, lat); moved = True
+                lat = math.copysign(7.0, lat); moved = "jaw"
             if moved:
+                old = g["cm"]
                 g["cm"] = self._abs(fwd, lat); self.pushes += 1
+                # บัญชีการชน: ก้อนไหนโดนอะไร ขยับไปกี่ cm และหลุดออกจากวงไหม
+                self.hit_cm[moved] += nav.dist(*old, *g["cm"])
+                if id(g) not in self.hit_ids[moved]:
+                    self.hit_ids[moved].add(id(g))
+                zo = self._zone_of(old); zn = self._zone_of(g["cm"])
+                if zo is not None and zn != zo:
+                    self.zone_exits += 1
+                    key = f"{self.cur_state}/{moved}" + ("/correct" if zo == g["class"] else "/wrongzone")
+                    self.zone_exit_by[key] = self.zone_exit_by.get(key, 0) + 1
                 # หินที่ถูกดันไปชนเพื่อนบ้าน -> ดันเพื่อนบ้านออก (ไม่ซ้อนกัน)
                 for o in self.gems:
                     if o is g:
@@ -226,6 +251,7 @@ def run(seed=3, ideal=False, verbose=True):
     t_last = CLOCK.t
     while pl.state != "DONE":
         CLOCK.sleep(dt)
+        world.cur_state = pl.state
         world.update(CLOCK.t - t_last); t_last = CLOCK.t
         link.tick()
         frame += 1
@@ -235,7 +261,8 @@ def run(seed=3, ideal=False, verbose=True):
         pl.step(pose, "OK", gems)
         if CLOCK.t - t_last > 1000:
             break
-    stats = {"delivered": pl.delivered, "runover": world.runover, "pushes": world.pushes,
+    stats = {"delivered": pl.delivered, "score": world.score(), "zone_exit_by": world.zone_exit_by,
+             "runover": world.runover, "pushes": world.pushes,
              "picked": sum(1 for l in lines if l.startswith("picked")),
              "still": sum(1 for l in lines if "still there" in l),
              "pushed": sum(1 for l in lines if "pushed" in l),
@@ -243,7 +270,12 @@ def run(seed=3, ideal=False, verbose=True):
              "timeout": sum(1 for l in lines if "timeout" in l),
              "left_in_bin": len(world.bin),
              "verify TP/FP/TN/FN": (verdict["tp"], verdict["fp"], verdict["tn"], verdict["fn"]),
-             "wrong_colour_grabs": sum(1 for l in lines if "คว้าสีอื่น" in l or "สีอื่น" in l)}
+             "wrong_colour_grabs": sum(1 for l in lines if "คว้าสีอื่น" in l or "สีอื่น" in l),
+             # การชน: (จำนวนก้อนที่โดน, ระยะรวม cm) แยก ตัวหุ่น / ที่นั่งปาก / ข้างก้าม + หินหลุดวง
+             "hit_body": (len(world.hit_ids["body"]), round(world.hit_cm["body"])),
+             "hit_seat": (len(world.hit_ids["seat"]), round(world.hit_cm["seat"])),
+             "hit_jaw": (len(world.hit_ids["jaw"]), round(world.hit_cm["jaw"])),
+             "zone_exits": world.zone_exits}
     return stats, lines
 
 
