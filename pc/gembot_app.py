@@ -19,6 +19,7 @@ import numpy as np
 import auto_config as C
 import nav
 import ui
+from ui import rrect, card, button, chip, stepper
 from calibrate_colors import (COLOR_CLASSES, build_mask, clean_mask, load_profiles, save_profiles,
                               DEFAULT_PROFILES)
 from field_vision import (FieldCalibration, detect_zones_auto, detect_gems, resolve_ambiguous,
@@ -32,6 +33,7 @@ STEPS = ["กล้อง", "ครอบสนาม", "วง 6 สี", "ส�
 COLOR_TH = {"IRIDESCENT_VIOLET": "ม่วง", "NEON_CYAN": "ฟ้าอ่อน", "DEEP_CRIMSON": "แดง",
             "MARIGOLD_ACCENT": "ส้ม", "DEEP_SKY_BLUE": "น้ำเงิน", "LIME_GREEN": "เขียว"}
 KEY_ENTER, KEY_BACK, KEY_ESC = 13, 8, 27
+KEY_FIX = 0x7f0000                 # ปุ่มเสมือน: ไปขั้นแรกที่ยังไม่ผ่าน
 KEY_F = {0x700000 + i * 0x10000: i for i in range(6)}   # F1..F6 จาก cv2.waitKeyEx บน Windows
 
 
@@ -91,6 +93,9 @@ class App:
         self.step = 0
         self.msg = ""                     # ข้อความบรรทัดล่างของกล่องคำสั่ง
         self.mouse = (0, 0)
+        self.mouse_f = None
+        self.pending_key = None
+        self.buttons = []
         self.clicks = []                  # คลิกที่ยังไม่ได้ใช้ (x, y)
         # ข้อมูลสนาม
         fm = load_field_map()
@@ -141,8 +146,13 @@ class App:
     # ---------- เมาส์ ----------
     def on_mouse(self, event, x, y, flags, param):
         self.mouse = (x, y)
+        self.mouse_f = self.to_frame(x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.clicks.append((x, y))
+            key = self.click_button(x, y)
+            if key is not None:
+                self.pending_key = key
+            elif self.mouse_f is not None:
+                self.clicks.append(self.mouse_f)
 
     # ---------- เปลี่ยนขั้น ----------
     def goto(self, s):
@@ -272,73 +282,83 @@ class App:
         subprocess.call(cmd, cwd=HERE, env=env)
         print("[APP] auto_main exited -> back to app")
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WIN, self.CW, self.CH)
         cv2.setMouseCallback(WIN, self.on_mouse)
         self.open_cam(self.cam)
         self.tracker = None
         self.goto(5)
 
     # ==================================================================
-    #  วาดจอ
+    #  วาดจอ (v4.3 layout: กล้องซ้ายไม่มีอะไรบัง / การ์ดขวา / ปุ่มกดเมาส์ได้)
     # ==================================================================
+    CW, CH = 1440, 810                 # canvas
+    TOP = 64                           # แถบ stepper
+    SIDE = 400                         # แถบขวา
+    BOT = 44                           # แถบคีย์ล่าง
+
+    def cam_rect(self):
+        """พื้นที่วางภาพกล้อง (x, y, w, h) รักษาสัดส่วนเฟรม"""
+        aw, ah = self.CW - self.SIDE - 24, self.CH - self.TOP - self.BOT - 16
+        fh, fw = (self.frame.shape[:2] if self.frame is not None else (720, 1280))
+        s = min(aw / fw, ah / fh)
+        w, h = int(fw * s), int(fh * s)
+        return 12 + (aw - w) // 2, self.TOP + 8 + (ah - h) // 2, w, h
+
+    def to_frame(self, x, y):
+        """พิกัดเมาส์บน canvas -> พิกัดในเฟรมกล้อง (None ถ้าอยู่นอกภาพ)"""
+        cx, cy, cw, ch = self.cam_rect()
+        if not (cx <= x < cx + cw and cy <= y < cy + ch) or self.frame is None:
+            return None
+        fh, fw = self.frame.shape[:2]
+        return (int((x - cx) * fw / cw), int((y - cy) * fh / ch))
+
     def step_done(self, i):
-        return [self.cap is not None and self.cap.isOpened(), self.calib is not None, len(self.zones) == 6,
+        return [self.still is not None or (self.cap is not None and self.cap.isOpened()),
+                self.calib is not None, len(self.zones) == 6,
                 os.path.exists("color_profiles.json"), self.pstat == "OK", False][i]
 
-    def draw_stepbar(self, out):
-        W = out.shape[1]
-        x, y, h = 12, 8, 34
-        ui._shade(out, 0, 0, W, h + 16, alpha=0.8)
-        for i, name in enumerate(STEPS):
-            label = f"{i + 1}. {name}"
-            col = "key" if i == self.step else ("ok" if self.step_done(i) else "dim")
-            ui._blit_text(out, [(x, y, label, ui.COL[col], 18, i == self.step)])
-            w = ui._width(label, 18, True) + 26
-            if i == self.step:
-                cv2.rectangle(out, (x - 6, y - 4), (x + w - 20, y + 26), ui.COL["key"], 1)
-            x += w
-        ui._blit_text(out, [(W - 250, y, f"กล้อง {self.cam}   ขั้นที่ {self.step + 1}/6", ui.COL["dim"], 16, False)])
-
-    def draw_loupe(self, out):
+    def draw_loupe(self, out, x, y, size=180):
         """แว่นขยาย 4x ตรงเมาส์ (ไว้คลิกมุมสนามให้แม่น)"""
-        if self.frame is None:
+        if self.frame is None or self.mouse_f is None:
+            rrect(out, x, y, size, size, ui.COL["panel2"], r=8)
+            ui._blit_text(out, [(x + 14, y + size // 2 - 10, "เลื่อนเมาส์ไปบนภาพ", ui.COL["dim"], 15, False)])
             return
-        mx, my = self.mouse
+        mx, my = self.mouse_f
         H, W = self.frame.shape[:2]
-        r = 24
-        x0, y0 = max(0, mx - r), max(0, my - r)
+        r = size // 8
+        x0, y0 = min(max(0, mx - r), W - 2 * r), min(max(0, my - r), H - 2 * r)
         crop = self.frame[y0:y0 + 2 * r, x0:x0 + 2 * r]
-        if crop.size == 0:
-            return
-        big = cv2.resize(crop, (2 * r * 4, 2 * r * 4), interpolation=cv2.INTER_NEAREST)
-        bh, bw = big.shape[:2]
-        cv2.line(big, (bw // 2, 0), (bw // 2, bh), (0, 255, 255), 1)
-        cv2.line(big, (0, bh // 2), (bw, bh // 2), (0, 255, 255), 1)
-        px, py = W - bw - 16, 60
-        out[py:py + bh, px:px + bw] = big
-        cv2.rectangle(out, (px, py), (px + bw, py + bh), (255, 255, 255), 1)
+        big = cv2.resize(crop, (size, size), interpolation=cv2.INTER_NEAREST)
+        cx, cy = (mx - x0) * 4, (my - y0) * 4
+        cv2.line(big, (cx, 0), (cx, size), (0, 255, 255), 1)
+        cv2.line(big, (0, cy), (size, cy), (0, 255, 255), 1)
+        out[y:y + size, x:x + size] = big
+        rrect(out, x, y, size, size, (255, 255, 255), r=6, thickness=1)
 
     def draw_field(self, out):
         if self.corners:
             pts = np.array(self.corners, np.int32)
             cv2.polylines(out, [pts], True, (0, 255, 255), 2)
             for i, p in enumerate(self.corners):
-                cv2.circle(out, tuple(p), 6, (0, 255, 255), -1)
-                cv2.putText(out, str(i + 1), (p[0] + 8, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.circle(out, tuple(p), 7, (0, 255, 255), -1)
+                cv2.circle(out, tuple(p), 7, (0, 0, 0), 1)
 
     def draw_zones(self, out):
         for name, z in self.zones.items():
             col = DRAW_BGR.get(name, (255, 255, 255))
             cx, cy = int(z["px"][0]), int(z["px"][1])
-            cv2.circle(out, (cx, cy), int(z["radius_px"]), col, 2)
+            cv2.circle(out, (cx, cy), int(z["radius_px"]), col, 3, cv2.LINE_AA)
             label = f"{COLOR_CLASSES.index(name) + 1} {COLOR_TH.get(name, name)}"
-            w = ui._width(label, 18, True)
-            ui._shade(out, cx - w // 2 - 6, cy - 12, w + 12, 26, alpha=0.6)
-            ui._blit_text(out, [(cx - w // 2, cy - 10, label, (255, 255, 255), 18, True)])
+            w = ui._width(label, 20, True)
+            ui._shade(out, cx - w // 2 - 8, cy - 14, w + 16, 30, alpha=0.65)
+            ui._blit_text(out, [(cx - w // 2, cy - 12, label, (255, 255, 255), 20, True)])
 
     def draw_gems(self, out):
         for g in self.gems:
             col = DRAW_BGR.get(g["class"], (255, 255, 255))
-            cv2.circle(out, tuple(map(int, g["px"])), 9, col, 2)
+            c = tuple(map(int, g["px"]))
+            cv2.circle(out, c, 13, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.circle(out, c, 13, col, 1, cv2.LINE_AA)
 
     def draw_robot(self, out):
         if self.pose is None or self.calib is None or "cm" not in self.pose:
@@ -346,104 +366,171 @@ class App:
         ax, ay, th = nav.axle_pose(self.pose)
         p0 = self.calib.to_pixel((ax, ay)); p1 = self.calib.to_pixel(nav.point_ahead(ax, ay, th, 20))
         gp = self.calib.to_pixel(nav.gripper_point(ax, ay, th))
-        cv2.arrowedLine(out, p0, p1, (0, 255, 0), 3, tipLength=0.3)
-        cv2.circle(out, gp, 6, (0, 0, 255), -1)
+        cv2.arrowedLine(out, p0, p1, (0, 255, 0), 4, tipLength=0.3, line_type=cv2.LINE_AA)
+        cv2.circle(out, gp, 7, (0, 0, 255), -1, cv2.LINE_AA)
         if self.goal is not None:
-            cv2.circle(out, self.calib.to_pixel(self.goal), 10, (255, 0, 255), 2)
+            cv2.circle(out, self.calib.to_pixel(self.goal), 12, (255, 0, 255), 2, cv2.LINE_AA)
 
-    def color_rows(self):
-        rows = []
-        for i, c in enumerate(COLOR_CLASSES):
-            n = sum(1 for g in self.gems if g["class"] == c)
-            k = len(self.samples[c])
-            mark = "> " if i == self.sel_color else "   "
-            rows.append((f"{mark}{i + 1} {COLOR_TH[c]}", f"เห็น {n} ก้อน" + (f"  (คลิกแล้ว {k})" if k else ""),
-                         "ok" if n else ("warn" if k else "dim")))
-        return rows
-
-    def panel_for_step(self, out):
+    def draw_frame_overlays(self, f):
         s = self.step
+        if s == 3 and self.show_mask:
+            hsv = cv2.cvtColor(cv2.GaussianBlur(f, (5, 5), 0), cv2.COLOR_BGR2HSV)
+            m = clean_mask(build_mask(hsv, self.profiles[COLOR_CLASSES[self.sel_color]]), kernel_size=3)
+            f = cv2.addWeighted(f, 0.35, cv2.cvtColor(m, cv2.COLOR_GRAY2BGR), 0.65, 0)
+        if s >= 1:
+            self.draw_field(f)
+            if s == 1:
+                for i, p in enumerate(self.clicks[:4]):
+                    cv2.circle(f, p, 8, (0, 200, 255), -1)
+                    cv2.circle(f, p, 8, (0, 0, 0), 1)
+                if len(self.clicks) >= 2:
+                    cv2.polylines(f, [np.array(self.clicks[:4], np.int32)], len(self.clicks) >= 4, (0, 200, 255), 1)
+        if s >= 2:
+            self.draw_zones(f)
+        if s in (3, 5):
+            self.draw_gems(f)
+        if s in (4, 5):
+            self.draw_robot(f)
+        return f
+
+    # ---------- แถบขวา ----------
+    def side_content(self, out, x, y, w):
+        """เขียนเนื้อหาของขั้นในการ์ด คืน (y ถัดไป, [ปุ่ม])  ปุ่ม = (label, key_hint, action_key, kind)"""
+        s = self.step
+        rows = []
+        btns = []
         if s == 0:
-            rows = [("กด 1-4 สลับกล้อง จนเห็นภาพสนามทั้งสนาม", None, "text"),
-                    ("ตอนนี้", f"กล้อง index {self.cam}" + ("" if self.grab_ok else "  (เปิดไม่ได้!)"),
-                     "ok" if self.grab_ok else "bad"), None,
-                    ("Enter = ใช้กล้องนี้", None, "dim")]
-            title = "1) กล้อง"
+            rows = [("เลือกกล้องที่เห็นสนามเต็ม", None, "text"),
+                    ("กด 0-4 เพื่อสลับกล้อง", None, "dim"), None,
+                    ("ตอนนี้", f"index {self.cam}" + ("" if self.grab_ok else "  เปิดไม่ได้!"),
+                     "ok" if self.grab_ok else "bad")]
+            btns = [("ใช้กล้องนี้", "Enter", KEY_ENTER, "primary" if self.grab_ok else "disabled")]
         elif s == 1:
             n = len(self.clicks)
             names = ["ซ้ายบน", "ขวาบน", "ขวาล่าง", "ซ้ายล่าง"]
-            rows = [(f"คลิกมุมสนาม 4 มุม ตามลำดับ (ดูแว่นขยายมุมขวาบน)", None, "text"),
-                    ("คลิกถัดไป", names[n] if n < 4 else "ครบแล้ว", "key" if n < 4 else "ok"),
-                    ("ค่าเดิม", "มี — กด Enter ใช้เลยได้" if self.corners and n == 0 else "-", "ok" if self.corners else "dim"),
-                    None, ("R = ล้างแล้วคลิกใหม่", None, "dim")]
-            title = "2) ครอบสนาม"
+            rows = [("คลิกมุมสนาม 4 มุม ตามลำดับ", None, "text"),
+                    ("ซ้ายบน → ขวาบน → ขวาล่าง → ซ้ายล่าง", None, "dim"), None,
+                    ("คลิกถัดไป", names[n] if n < 4 else "ครบ 4 มุมแล้ว", "key" if n < 4 else "ok"),
+                    ("ค่าเดิม", "มี — กด Enter ใช้เลยได้" if self.corners and n == 0 else "-",
+                     "ok" if (self.corners and n == 0) else "dim")]
+            btns = [("ยืนยันกรอบ", "Enter", KEY_ENTER, "primary" if (n >= 4 or self.corners) else "disabled"),
+                    ("ล้าง คลิกใหม่", "R", ord('r'), "normal")]
         elif s == 2:
             rows = [("โปรแกรมหาวงเอง — เช็คป้ายชื่อบนวงว่าถูกสี", None, "text"),
-                    ("วงที่ได้", f"{len(self.zones)}/6", "ok" if len(self.zones) == 6 else "warn"),
-                    ("วงไหนหาย/ผิด", "กดเลขสี แล้วคลิกกลางวงนั้น", None),
-                    (f"สีที่เลือก", f"{self.sel_color + 1} {COLOR_TH[COLOR_CLASSES[self.sel_color]]}", "key"),
-                    None, ("R = หาใหม่   Enter = บันทึกไปขั้นสี", None, "dim")]
-            title = "3) วง 6 สี"
+                    ("วงไหนหาย/ผิด: กดเลขสี แล้วคลิกกลางวง", None, "dim"), None,
+                    ("วงที่ได้", f"{len(self.zones)} / 6", "ok" if len(self.zones) == 6 else "warn")]
+            btns = [("บันทึกวง ไปขั้นสี", "Enter", KEY_ENTER, "primary"),
+                    ("หาวงใหม่", "R", ord('r'), "normal")]
         elif s == 3:
-            rows = [("กดเลขสี แล้วคลิกหินสีนั้น 2-3 ก้อน (คนละก้อน/คนละมุมสนาม)", None, "text")] + self.color_rows() + \
-                   [None, ("M = ดู mask สีที่เลือก   R = ล้างสีที่เลือก   Enter = บันทึก", None, "dim")]
-            title = "4) สีหิน (คลิกหิน)"
+            rows = [("กดเลขสี แล้วคลิกหินสีนั้น 2-3 ก้อน", None, "text"),
+                    ("คลิกคนละก้อน คนละมุมสนาม จะทนแสงกว่า", None, "dim")]
+            btns = [("บันทึกสี ไปขั้นหุ่น", "Enter", KEY_ENTER, "primary"),
+                    ("ดู mask สีที่เลือก", "M", ord('m'), "normal"),
+                    ("ล้างสีที่เลือก", "R", ord('r'), "normal")]
         elif s == 4:
             seen = self.pstat == "OK" and self.pose is not None and "cm" in self.pose
-            pos = f"({self.pose['cm'][0]:.0f}, {self.pose['cm'][1]:.0f}) หัน {nav.axle_pose(self.pose)[2]:.0f}°" if seen else "-"
-            rows = [("วางหุ่นในสนาม ลูกศรเขียวต้องชี้ทางหน้าหุ่น จุดแดง = ปาก", None, "text"),
+            pos = (f"({self.pose['cm'][0]:.0f}, {self.pose['cm'][1]:.0f}) cm  หัน {nav.axle_pose(self.pose)[2]:.0f}°"
+                   if seen else "-")
+            wifi = bool(self.link and self.link.alive)
+            rows = [("วางหุ่นในสนาม: ลูกศรเขียว = หน้าหุ่น, จุดแดง = ปาก", None, "text"), None,
                     ("กล้องเห็นแท็ก", "เห็น" if seen else "ไม่เห็น", "ok" if seen else "bad"),
                     ("ตำแหน่ง", pos, "dim"),
-                    ("WiFi ถึงหุ่น", "ต่ออยู่" if (self.link and self.link.alive) else "ขาด",
-                     "ok" if (self.link and self.link.alive) else "bad"),
-                    ("ทดสอบวิ่ง", "กด 1-6 วิ่งไปวงสีนั้น / SPACE หยุด", "key"),
-                    None, ("Enter = ไปหน้าสรุป", None, "dim")]
-            title = "5) หุ่น"
+                    ("WiFi ถึงหุ่น", "ต่ออยู่" if wifi else "ขาด (ต่อ WiFi GEMBOT)", "ok" if wifi else "bad"), None,
+                    ("ทดสอบวิ่ง: กด 1-6 วิ่งไปวงสีนั้น", None, "dim")]
+            btns = [("ไปหน้าสรุป", "Enter", KEY_ENTER, "primary"),
+                    ("หยุดหุ่น", "SPACE", ord(' '), "danger")]
         else:
-            rows = []
             ok_all = True
+            self.check_icons = []
             for name, ok, note in self.checklist():
-                rows.append((name, ("OK  " if ok else "X   ") + note, "ok" if ok else "bad"))
+                rows.append((name, note, "ok" if ok else "bad"))
+                self.check_icons.append(ok)
                 ok_all = ok_all and ok
-            rows += [None, ("SPACE = เริ่มโหมด AUTO (เปิด auto_main.py)", None, "key" if ok_all else "warn"),
-                     ("F1-F5 = กระโดดไปแก้ขั้นที่ยังแดง", None, "dim")]
-            title = "พร้อมแข่ง" if ok_all else "ยังไม่พร้อม — ดูรายการสีแดง"
+            rows += [None, ("เขียวครบ = พร้อม  /  แดง = กด F1-F5 ไปแก้ขั้นนั้น", None, "dim")]
+            btns = [("เริ่มโหมด AUTO", "SPACE", ord(' '), "primary" if ok_all else "normal"),
+                    ("ไปแก้ขั้นที่ยังไม่ผ่าน", "F1-F5", KEY_FIX, "normal" if not ok_all else "disabled")]
         if self.msg:
             rows += [None, (self.msg, None, "warn")]
-        ui.panel(out, 12, 60, rows, title=title, size=17, line_h=25)
+
+        # เนื้อหา
+        label_w = max([ui._width(str(r[0]), 16) for r in rows if isinstance(r, tuple) and r[1] is not None] + [0])
+        cy = y
+        items = []
+        for r in rows:
+            if r is None:
+                cy += 12; continue
+            if r[1] is None:
+                col = ui.COL.get(r[2] if len(r) > 2 else "text", ui.COL["text"])
+                items.append((x, cy, str(r[0]), col, 16, False)); cy += 24
+            else:
+                col = ui.COL.get(r[2] if len(r) > 2 else "text", ui.COL["text"])
+                items.append((x, cy, str(r[0]), ui.COL["dim"], 16, False))
+                items.append((x + label_w + 14, cy, str(r[1]), col, 16, False)); cy += 24
+        if s == 5:
+            icons = getattr(self, "check_icons", [])
+            for i, it in enumerate([it for it in items if it[3] == ui.COL["dim"]][:len(icons)]):
+                cv2.circle(out, (it[0] + label_w + 14 + 8, it[1] + 10), 7,
+                           ui.COL["ok"] if icons[i] else ui.COL["bad"], -1, cv2.LINE_AA)
+            # เลื่อนข้อความค่าให้พ้นไอคอน
+            items = [(ix + (24 if (ix != x and s == 5) else 0), iy, t, c, sz, b) for ix, iy, t, c, sz, b in items]
+        ui._blit_text(out, items)
+        cy += 8
+        # ชิปสี (ขั้น 3 และ 4)
+        if s in (2, 3):
+            for i, c in enumerate(COLOR_CLASSES):
+                if s == 3:
+                    n = sum(1 for g in self.gems if g["class"] == c); k = len(self.samples[c])
+                    sub = f"เห็น {n}" + (f" · คลิก {k}" if k else ""); st = "ok" if n else ("warn" if k else "dim")
+                else:
+                    have = c in self.zones
+                    sub = "มีวง" if have else "ไม่มี"; st = "ok" if have else "bad"
+                chip(out, x, cy, w, 32, DRAW_BGR[c], f"{i + 1}  {COLOR_TH[c]}", sub, selected=(i == self.sel_color), state=st)
+                self.buttons.append(((x, cy, w, 32), ord('1') + i))
+                cy += 38
+            cy += 6
+        return cy, btns
 
     def render(self):
-        if self.frame is None:
-            out = np.zeros((720, 1280, 3), np.uint8)
-        else:
-            out = self.frame.copy()
-        s = self.step
-        if s == 3 and self.show_mask:
-            hsv = cv2.cvtColor(cv2.GaussianBlur(self.frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
-            m = clean_mask(build_mask(hsv, self.profiles[COLOR_CLASSES[self.sel_color]]), kernel_size=3)
-            out = cv2.addWeighted(out, 0.35, cv2.cvtColor(m, cv2.COLOR_GRAY2BGR), 0.65, 0)
-        if s >= 1:
-            self.draw_field(out)
-            if s == 1:
-                for i, p in enumerate(self.clicks[:4]):
-                    cv2.circle(out, p, 7, (0, 200, 255), -1)
-                    cv2.putText(out, str(i + 1), (p[0] + 8, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
-                if len(self.clicks) >= 2:
-                    cv2.polylines(out, [np.array(self.clicks[:4], np.int32)], len(self.clicks) >= 4, (0, 200, 255), 1)
-                self.draw_loupe(out)
-        if s >= 2:
-            self.draw_zones(out)
-        if s in (3, 5):
-            self.draw_gems(out)
-        if s in (4, 5):
-            self.draw_robot(out)
-        self.draw_stepbar(out)
-        self.panel_for_step(out)
-        keys = [("Enter", "ถัดไป"), ("Backspace", "ย้อน"), ("R", "ทำใหม่"), ("F1-F6", "ไปขั้น"), ("Q", "ออก")]
-        if s == 5:
-            keys = [("SPACE", "เริ่ม AUTO")] + keys
-        ui.keybar(out, keys)
+        out = np.full((self.CH, self.CW, 3), ui.COL["canvas"], np.uint8)
+        # --- ภาพกล้อง ---
+        cx, cy, cw, ch = self.cam_rect()
+        if self.frame is not None:
+            f = self.draw_frame_overlays(self.frame.copy())
+            out[cy:cy + ch, cx:cx + cw] = cv2.resize(f, (cw, ch), interpolation=cv2.INTER_AREA)
+        rrect(out, cx - 1, cy - 1, cw + 2, ch + 2, ui.COL["line"], r=6, thickness=1)
+        # --- stepper ---
+        done = [self.step_done(i) for i in range(6)]
+        stepper(out, 24, 8, self.CW - self.SIDE - 60, STEPS, self.step, done)
+        ui._blit_text(out, [(self.CW - self.SIDE + 12, 22, f"GEMBOT  ·  กล้อง {self.cam}", ui.COL["dim"], 15, False)])
+        # --- การ์ดขวา ---
+        sx, sy, sw = self.CW - self.SIDE + 12, self.TOP + 8, self.SIDE - 24
+        sh = self.CH - self.TOP - self.BOT - 16
+        title = ["1) กล้อง", "2) ครอบสนาม", "3) วง 6 สี", "4) สีหิน — คลิกหิน", "5) หุ่น", "6) พร้อมแข่ง"][self.step]
+        if self.step == 5:
+            title = "6) พร้อมแข่ง" if all(ok for _, ok, _ in self.checklist()) else "6) ยังไม่พร้อม"
+        y0 = card(out, sx, sy, sw, sh, title=title)
+        self.buttons = []
+        y1, btns = self.side_content(out, sx + 16, y0, sw - 32)
+        if self.step == 1:
+            self.draw_loupe(out, sx + (sw - 180) // 2, max(y1, sy + sh - 320), 180)
+        # ปุ่ม (เรียงจากล่างขึ้น ปุ่มหลักล่างสุด)
+        by = sy + sh - 16
+        for label, hint, key, kind in btns:
+            bh = 46 if kind == "primary" else 38
+            by -= bh
+            button(out, sx + 16, by, sw - 32, bh, label, kind=kind, key=hint)
+            self.buttons.append(((sx + 16, by, sw - 32, bh), key))
+            by -= 8
+        # --- แถบล่าง ---
+        keys = [("Enter", "ถัดไป"), ("Backspace", "ย้อน"), ("R", "ทำใหม่"), ("F1-F6", "ไปขั้นที่"), ("Q", "ออก")]
+        ui.keybar(out, keys, y=self.CH - self.BOT, size=15)
         return out
+
+    def click_button(self, x, y):
+        for (bx, by, bw, bh), key in getattr(self, "buttons", []):
+            if bx <= x < bx + bw and by <= y < by + bh:
+                return key
+        return None
 
     # ==================================================================
     #  คีย์
@@ -453,6 +540,11 @@ class App:
             return False
         if k in KEY_F:
             self.goto(KEY_F[k]); return True
+        if k == KEY_FIX:
+            for i, (_, ok, _) in enumerate(self.checklist()):
+                if not ok:
+                    self.goto(min(i, 4)); break        # WiFi (ข้อ 6) อยู่ในขั้นหุ่น
+            return True
         if k == KEY_BACK:
             self.goto(self.step - 1); return True
         s = self.step
@@ -525,7 +617,7 @@ class App:
     # ==================================================================
     def run(self):
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WIN, 1280, 720)
+        cv2.resizeWindow(WIN, self.CW, self.CH)
         cv2.setMouseCallback(WIN, self.on_mouse)
         self.grab_ok = self.open_cam(self.cam) and self.grab()
         if not self.grab_ok:
@@ -553,6 +645,8 @@ class App:
                 self.clicks.clear()
             cv2.imshow(WIN, self.render())
             k = cv2.waitKeyEx(1)
+            if self.pending_key is not None:
+                k, self.pending_key = self.pending_key, None
             if k == -1:
                 continue
             kk = k & 0xFF if k < 0x100000 else k

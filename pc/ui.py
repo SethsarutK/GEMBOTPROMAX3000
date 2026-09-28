@@ -308,3 +308,100 @@ def state_line(state, msg=""):
 def mmss(sec):
     sec = max(0, int(sec))
     return f"{sec // 60}:{sec % 60:02d}"
+
+
+# ==================================================================
+#  v4.3: ชิ้นส่วนสำหรับ gembot_app (การ์ด / ปุ่ม / ชิปสี / stepper) — วาดอย่างเดียวเหมือนเดิม
+# ==================================================================
+COL.update({
+    "panel":  (34, 32, 30),      # พื้นการ์ด
+    "panel2": (48, 46, 44),      # พื้นการ์ดอ่อน
+    "line":   (70, 68, 66),
+    "accent": (255, 170, 60),    # ฟ้า (BGR) = ปุ่มหลัก/ขั้นปัจจุบัน
+    "accent_dk": (140, 90, 20),
+    "canvas": (24, 23, 22),
+})
+
+
+def rrect(img, x, y, w, h, color, r=10, thickness=-1):
+    """สี่เหลี่ยมมุมมน"""
+    x, y, w, h = int(x), int(y), int(w), int(h)
+    r = max(1, min(r, w // 2, h // 2))
+    if thickness < 0:
+        cv2.rectangle(img, (x + r, y), (x + w - r, y + h), color, -1)
+        cv2.rectangle(img, (x, y + r), (x + w, y + h - r), color, -1)
+        for cx, cy in ((x + r, y + r), (x + w - r, y + r), (x + r, y + h - r), (x + w - r, y + h - r)):
+            cv2.circle(img, (cx, cy), r, color, -1, cv2.LINE_AA)
+    else:
+        cv2.line(img, (x + r, y), (x + w - r, y), color, thickness, cv2.LINE_AA)
+        cv2.line(img, (x + r, y + h), (x + w - r, y + h), color, thickness, cv2.LINE_AA)
+        cv2.line(img, (x, y + r), (x, y + h - r), color, thickness, cv2.LINE_AA)
+        cv2.line(img, (x + w, y + r), (x + w, y + h - r), color, thickness, cv2.LINE_AA)
+        for cx, cy, a in ((x + r, y + r, 180), (x + w - r, y + r, 270), (x + w - r, y + h - r, 0), (x + r, y + h - r, 90)):
+            cv2.ellipse(img, (cx, cy), (r, r), a, 0, 90, color, thickness, cv2.LINE_AA)
+
+
+def card(img, x, y, w, h, title=None, color=None):
+    """การ์ดพื้นเข้ม มีหัวข้อ คืน y ที่เริ่มเขียนเนื้อหาได้"""
+    rrect(img, x, y, w, h, color or COL["panel"], r=12)
+    if title:
+        _blit_text(img, [(x + 16, y + 12, title, COL["key"], 19, True)])
+        cv2.line(img, (x + 16, y + 44), (x + w - 16, y + 44), COL["line"], 1)
+        return y + 54
+    return y + 14
+
+
+def button(img, x, y, w, h, text, kind="primary", key=None):
+    """ปุ่ม: kind = primary (ฟ้า) / normal (เทา) / danger (แดง) / disabled ; key = ป้ายคีย์ลัดตัวเล็กทางซ้าย"""
+    bg = {"primary": COL["accent"], "normal": COL["panel2"], "danger": (60, 60, 200),
+          "disabled": (40, 40, 40)}.get(kind, COL["panel2"])
+    fg = (20, 20, 20) if kind == "primary" else ((120, 120, 120) if kind == "disabled" else COL["text"])
+    rrect(img, x, y, w, h, bg, r=10)
+    size = 18
+    tw = _width(text, size, True)
+    kw = 0
+    if key:
+        kw = _width(key, 14, True) + 14
+        rrect(img, x + 12, y + h // 2 - 12, kw, 24, (0, 0, 0) if kind == "primary" else COL["line"], r=6)
+        _blit_text(img, [(x + 19, y + h // 2 - 9, key, COL["text"] if kind != "primary" else COL["key"], 14, True)])
+    tx = x + (w - tw + kw) // 2
+    _blit_text(img, [(tx, y + h // 2 - size // 2 - 2, text, fg, size, True)])
+
+
+def chip(img, x, y, w, h, color_bgr, text, sub=None, selected=False, state="text"):
+    """แถวสี: จุดสีจริง + ชื่อ + ค่า/สถานะ  selected = กรอบฟ้า"""
+    rrect(img, x, y, w, h, COL["panel2"], r=8)
+    if selected:
+        rrect(img, x, y, w, h, COL["accent"], r=8, thickness=2)
+    cv2.circle(img, (x + 18, y + h // 2), 9, color_bgr, -1, cv2.LINE_AA)
+    cv2.circle(img, (x + 18, y + h // 2), 9, (255, 255, 255), 1, cv2.LINE_AA)
+    _blit_text(img, [(x + 36, y + h // 2 - 10, text, COL["text"], 17, selected)])
+    if sub:
+        sw = _width(sub, 15)
+        _blit_text(img, [(x + w - sw - 12, y + h // 2 - 9, sub, COL.get(state, COL["text"]), 15, False)])
+
+
+def stepper(img, x, y, w, steps, current, done):
+    """แถบขั้นตอน: วงกลมเลข + เส้นเชื่อม  done = list[bool]"""
+    n = len(steps)
+    gap = (w - 40) // max(1, n - 1)
+    cy = y + 18
+    for i in range(n - 1):
+        c = COL["ok"] if done[i] else COL["line"]
+        cv2.line(img, (x + 20 + i * gap + 18, cy), (x + 20 + (i + 1) * gap - 18, cy), c, 2, cv2.LINE_AA)
+    for i, name in enumerate(steps):
+        cx = x + 20 + i * gap
+        if i == current:
+            cv2.circle(img, (cx, cy), 17, COL["accent"], -1, cv2.LINE_AA)
+            fg = (20, 20, 20)
+        elif done[i]:
+            cv2.circle(img, (cx, cy), 15, COL["ok"], -1, cv2.LINE_AA)
+            fg = (20, 20, 20)
+        else:
+            cv2.circle(img, (cx, cy), 15, COL["panel2"], -1, cv2.LINE_AA)
+            cv2.circle(img, (cx, cy), 15, COL["line"], 1, cv2.LINE_AA)
+            fg = COL["dim"]
+        num = str(i + 1)
+        _blit_text(img, [(cx - _width(num, 16, True) // 2, cy - 10, num, fg, 16, True)])
+        col = COL["key"] if i == current else (COL["ok"] if done[i] else COL["dim"])
+        _blit_text(img, [(cx - _width(name, 15, i == current) // 2, cy + 22, name, col, 15, i == current)])
