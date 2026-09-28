@@ -234,7 +234,16 @@ class Planner:
             return nav.go_to(ax, ay, th, *goal)
         if time.time() - self.path_t > C.PATH_REPLAN_S:
             p = nav.plan_path(ax, ay, goal[0], goal[1], self._obstacles(gems, exclude))
-            self.path = [goal] if p is None else (p if p else [goal])
+            new = [goal] if p is None else (p if p else [goal])
+            # v4.1: hysteresis — เส้นทางใหม่ต้องสั้นกว่าเส้นเดิมที่เหลือชัดเจน (>20%) ถึงจะเปลี่ยน
+            #       (เดิม A* สลับอ้อมกองซ้าย/ขวาทุก 1 วิ -> หุ่นหมุนกลับไปกลับมาอยู่กับที่จนหมด 25 วิ)
+            def plen(path):
+                pts = [(ax, ay)] + list(path)
+                return sum(nav.dist(*a, *b) for a, b in zip(pts, pts[1:]))
+            if self.path and len(self.path) > 1 and plen(new) >= 0.8 * plen(self.path):
+                pass                                    # เดินเส้นเดิมต่อ
+            else:
+                self.path = new
             self.path_t = time.time()
         # ตัด waypoint กลางทางที่ถึงแล้ว (ใช้ tol หลวม) จุดสุดท้ายใช้ go_to ปกติ
         while len(self.path) > 1 and nav.dist(ax, ay, *self.path[0]) <= C.PATH_WP_TOL_CM:
