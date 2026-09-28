@@ -16,7 +16,7 @@ class GemTracker:
     กรองหินให้ "นิ่ง" ก่อนเชื่อ: ตำแหน่ง+สีเดิมต้องเห็นติดกัน >= GEM_STABLE_FRAMES
     คืน list ของ dict {"cm","class","area","n"} เฉพาะที่นิ่งแล้ว
     """
-    MATCH_CM = 3.0
+    MATCH_CM = 6.0        # v4.0: 3 -> 6 หินโดนก้ามเขี่ยเล็กน้อยยังตามได้
 
     def __init__(self):
         self.tracks = []          # [{"cm","class","area","n","miss"}]
@@ -133,6 +133,28 @@ class Planner:
     def _count_in_zone(self, gems, color):
         return sum(1 for g in gems if g["class"] == color and self._in_zone(g["cm"]) == color)
 
+    # ---------- v4.0: ตรวจว่าหินอยู่ "ในโซนก้าม" แล้วหรือยัง ----------
+    def _in_jaw_zone(self, ax, ay, th, gem_cm):
+        """หินอยู่ตามแนวหน้าหุ่นระหว่าง (GRIP_REACH-5) ถึง (GRIP_REACH+2) และเยื้องข้าง <= 3 cm"""
+        r = math.radians(th)
+        dx, dy = gem_cm[0] - ax, gem_cm[1] - ay
+        fwd = dx * math.cos(r) + dy * math.sin(r)          # ระยะตามแนวหน้า
+        lat = -dx * math.sin(r) + dy * math.cos(r)         # เยื้องซ้าย/ขวา
+        return (C.GRIP_REACH_CM - 5.0) <= fwd <= (C.GRIP_REACH_CM + 2.0) and abs(lat) <= 3.0
+
+    def _nearest_same(self, cm, cls, within, exclude_cm=None):
+        """หาหิน (track ที่ยังเห็นอยู่) สีเดียวกัน ใกล้จุด cm ที่สุดภายในรัศมี within"""
+        best, bd = None, within
+        for t in self.tracker.tracks:
+            if t["class"] != cls or t["miss"] > 0:
+                continue
+            if exclude_cm is not None and nav.dist(*t["cm"], *exclude_cm) < 4.0:
+                continue
+            d = nav.dist(*t["cm"], *cm)
+            if d < bd:
+                best, bd = t, d
+        return best
+
     # ---------- หลบหิน (v3.8) ----------
     def _obstacles(self, gems, exclude=None):
         """ตำแหน่งหินทุกก้อนที่ต้องหลบ (ยกเว้นก้อนเป้าหมาย)"""
@@ -210,6 +232,14 @@ class Planner:
         # อย่าให้จุด approach ออกนอกสนาม
         ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
         return g, ap
+
+    def _approach_for(self, ax, ay, g):
+        """จุดตั้งต้นหน้าหิน g: ถอยจากหินมาทางหุ่น reach + standoff (ใช้ตอนเล็งก้อนที่ถูกดันใหม่)"""
+        dx, dy = ax - g["cm"][0], ay - g["cm"][1]
+        n = math.hypot(dx, dy) or 1.0
+        back = C.GRIP_REACH_CM + C.PILE_STANDOFF_CM
+        ap = (g["cm"][0] + dx / n * back, g["cm"][1] + dy / n * back)
+        return (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
 
     def _zone_approach(self, color, gems, ax=None, ay=None):
         """
@@ -325,13 +355,19 @@ class Planner:
             return f"ALIGN err={nav.norm_deg(want - th):.0f}"
 
         if st == "CREEP":
-            # หินอาจขยับ (ถูกชน) — ตามตำแหน่งล่าสุดของ track เดิม
+            # หินอาจขยับ (ถูกชน) — target เป็น track เดิม ตำแหน่งอัปเดตเองตราบที่กล้องยังตามได้
             vl, vr, done = nav.creep_to(ax, ay, th, *self.target["cm"], C.GRIP_REACH_CM, C.GRAB_TOL_CM)
+            # v4.0: หินเข้ามาอยู่ในโซนก้ามแล้ว = พอ ไม่ต้องคืบต่อ (เดิมคืบต่อจนดันหินเด้งออก)
+            in_jaw = self._in_jaw_zone(ax, ay, th, self.target["cm"])
+            lost = self.target.get("miss", 0) >= 2          # กล้องไม่เห็นหินแล้ว (มักเพราะเข้าไปอยู่ในก้าม)
+            if in_jaw or lost:
+                vl = vr = 0
             self._drive(vl, vr)
-            if done or self.in_state() > C.T_CREEP_TIMEOUT:
-                if not done: self.log("creep timeout -> pick anyway")
+            if done or in_jaw or lost or self.in_state() > C.T_CREEP_TIMEOUT:
+                why = "reach" if done else ("in jaw" if in_jaw else ("track lost" if lost else "timeout"))
+                self.log(f"creep -> pick ({why})")
                 self._drive(0, 0)
-                self.pick_pos = self.target["cm"]      # จำตำแหน่งหินก่อนหนีบ ไว้เช็คหลังถอย
+                self.pick_pos = tuple(self.target["cm"])   # จำตำแหน่งหินก่อนหนีบ ไว้เช็คหลังถอย
                 self.link.pick()
                 self._go("PICK")
             gp = nav.gripper_point(ax, ay, th)
@@ -349,14 +385,22 @@ class Planner:
             self._drive(0, 0)
             if self.in_state() < C.T_VERIFY:
                 return "VERIFY_PICK ..."
-            if self.tracker.still_there(self.pick_pos, self.target["class"], tol=6.0):
+            still = self.tracker.still_there(self.pick_pos, self.target["class"], tol=6.0)
+            pushed = None if still else self._nearest_same(self.pick_pos, self.target["class"], within=18.0)
+            if still or pushed is not None:
                 self.retry += 1
-                if self.retry <= C.PICK_RETRY:
+                if pushed is not None:
+                    # v4.0: หินไม่ได้หาย แค่ถูกดันไปข้าง ๆ -> เล็งก้อนที่ตำแหน่งใหม่ ไม่นับว่าหนีบได้
+                    self.log(f"gem pushed to {tuple(round(v) for v in pushed['cm'])}, retry {self.retry}")
+                    self.target = pushed
+                    self.approach = self._approach_for(ax, ay, pushed)
+                else:
                     self.log(f"gem still there, retry {self.retry}")
+                if self.retry <= C.PICK_RETRY:
                     self._go("BACKOFF")
                 else:
                     self.log("give up this gem")
-                    self.blacklist.append((self.target["cm"], self.target["class"]))
+                    self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
                     self._go("CHOOSE")
                 return "pick FAILED"
             self.bin_count += 1
