@@ -53,13 +53,18 @@ class RealWorld(auto_main.SimWorld):
         self.ideal = ideal
         self.hist = []            # (t, pose) สำหรับ latency
         self.gems = []
+        # หินกว้าง ~5 cm วางซ้อนกันไม่ได้ -> ศูนย์กลางห่างกันอย่างน้อย 2*GEM_R (กอง 54 ก้อนจึงกว้าง ~r 20)
         for c in auto_main.COLOR_CLASSES:
             for _ in range(9):
-                a = random.uniform(0, 2 * math.pi); r = random.uniform(0, 16)
+                for _try in range(200):
+                    a = random.uniform(0, 2 * math.pi); r = random.uniform(0, 20)
+                    p = (105 + r * math.cos(a), 60 + r * math.sin(a))
+                    if all(nav.dist(*p, *g["cm"]) >= 2 * self.GEM_R for g in self.gems):
+                        break
                 big = random.random() < 0.5
-                self.gems.append({"cm": (105 + r * math.cos(a), 60 + r * math.sin(a)),
-                                  "class": c, "area": 600 if big else 300})
+                self.gems.append({"cm": p, "class": c, "area": 600 if big else 300})
         self.pushes = 0
+        self.last_pick_d = 99
 
     # --- มอเตอร์ ---
     def _eff(self, vl, vr):
@@ -118,14 +123,28 @@ class RealWorld(auto_main.SimWorld):
                 lat = math.copysign(7.0, lat); moved = True
             if moved:
                 g["cm"] = self._abs(fwd, lat); self.pushes += 1
+                # หินที่ถูกดันไปชนเพื่อนบ้าน -> ดันเพื่อนบ้านออก (ไม่ซ้อนกัน)
+                for o in self.gems:
+                    if o is g:
+                        continue
+                    d = nav.dist(*g["cm"], *o["cm"])
+                    if d < 2 * self.GEM_R:
+                        ux, uy = ((o["cm"][0] - g["cm"][0]) / (d or 0.1), (o["cm"][1] - g["cm"][1]) / (d or 0.1))
+                        o["cm"] = (g["cm"][0] + ux * 2 * self.GEM_R, g["cm"][1] + uy * 2 * self.GEM_R)
 
     # --- หยิบ/ปล่อย ---
     def do_action(self):
         if self.pending == "pick":
             gx, gy = nav.gripper_point(self.x, self.y, self.th)
+            # firmware PICK = เปิดก่อนแล้วหนีบ -> ถ้ามีหินค้างในปากจะหล่นตรงนั้น
+            for g in self.bin:
+                self.gems.append({"cm": (gx + random.uniform(-1, 1), gy + random.uniform(-1, 1)),
+                                  "class": g["class"], "area": g["area"]})
+            self.bin = []
             best = min(self.gems, key=lambda g: nav.dist(gx, gy, *g["cm"]), default=None)
             tol = 4.0 if self.ideal else 3.0
-            if best and nav.dist(gx, gy, *best["cm"]) < tol and random.random() < 0.9:
+            self.last_pick_d = nav.dist(gx, gy, *best["cm"]) if best else 99
+            if best and self.last_pick_d < tol and random.random() < 0.9:
                 self.gems.remove(best); self.bin.append(best)
         elif self.pending == "dump":
             gx, gy = nav.gripper_point(self.x, self.y, self.th)
@@ -179,7 +198,17 @@ def run(seed=3, ideal=False, verbose=True):
     world = RealWorld(ZONES, ideal=ideal, seed=seed)
     link = RealLink(world)
     lines = []
+    verdict = {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "pick_d": []}
     def log(s):
+        # ให้คะแนนการตัดสินของ VERIFY_PICK เทียบกับความจริงในโลก sim
+        if s.startswith("picked"):
+            verdict["tp" if world.bin else "fp"] += 1
+            s += f"   [sim: {'จริง' if world.bin else 'ผิด! ปากเปล่า'} d={world.last_pick_d:.1f}]"
+        elif "still there" in s or "pushed" in s:
+            verdict["fn" if world.bin else "tn"] += 1
+            s += f"   [sim: {'ผิด! หินอยู่ในปาก' if world.bin else 'จริง'} d={world.last_pick_d:.1f}]"
+        if s.startswith("creep -> pick"):
+            pass
         lines.append(s)
         if verbose: print(s)
     pl = Planner(link, ZONES, zone_radius_cm=10, log=log)
@@ -204,7 +233,8 @@ def run(seed=3, ideal=False, verbose=True):
              "pushed": sum(1 for l in lines if "pushed" in l),
              "giveup": sum(1 for l in lines if "give up" in l),
              "timeout": sum(1 for l in lines if "timeout" in l),
-             "left_in_bin": len(world.bin)}
+             "left_in_bin": len(world.bin),
+             "verify TP/FP/TN/FN": (verdict["tp"], verdict["fp"], verdict["tn"], verdict["fn"])}
     return stats, lines
 
 

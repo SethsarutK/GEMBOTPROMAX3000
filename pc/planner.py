@@ -22,21 +22,29 @@ class GemTracker:
         self.tracks = []          # [{"cm","class","area","n","miss"}]
 
     def update(self, gems_cm):
-        used = [False] * len(gems_cm)
-        for t in self.tracks:
-            best, bd = -1, self.MATCH_CM
-            for i, g in enumerate(gems_cm):
-                if used[i] or g["class"] != t["class"]:
+        # v4.1: จับคู่ "คู่ที่ใกล้ที่สุดก่อน" ทั้งตาราง (เดิมไล่ทีละ track ตามลำดับสร้าง
+        #       -> track เก่าที่หินถูกหยิบไปแล้ว แย่งจุดของเพื่อนบ้านสีเดียวกันใน 6 cm
+        #       ทำให้ "หินยังอยู่" ทั้งที่หยิบได้แล้ว และ track เพื่อนบ้านกลายเป็น miss)
+        pairs = []
+        for ti, t in enumerate(self.tracks):
+            for gi, g in enumerate(gems_cm):
+                if g["class"] != t["class"]:
                     continue
                 d = nav.dist(*t["cm"], *g["cm"])
-                if d < bd:
-                    best, bd = i, d
-            if best >= 0:
-                used[best] = True
-                g = gems_cm[best]
-                t["cm"] = g["cm"]; t["area"] = g["area"]
-                t["n"] += 1; t["miss"] = 0
-            else:
+                if d < self.MATCH_CM:
+                    pairs.append((d, ti, gi))
+        pairs.sort()
+        used = [False] * len(gems_cm)
+        matched = [False] * len(self.tracks)
+        for d, ti, gi in pairs:
+            if used[gi] or matched[ti]:
+                continue
+            used[gi] = matched[ti] = True
+            t, g = self.tracks[ti], gems_cm[gi]
+            t["cm"] = g["cm"]; t["area"] = g["area"]
+            t["n"] += 1; t["miss"] = 0
+        for ti, t in enumerate(self.tracks):
+            if not matched[ti]:
                 t["miss"] += 1
         for i, g in enumerate(gems_cm):
             if not used[i]:
@@ -229,11 +237,18 @@ class Planner:
         if not loose:
             return None
         pile = self._pile_center(loose)
+        # v4.1: กองแน่นจนทุกก้อนมีเพื่อนบ้านเกิน MAX_NEIGHBORS -> เดิมคืน None แล้วหุ่นยืนนิ่งจนหมดเวลา
+        #       ตอนนี้ผ่อนเกณฑ์เป็น "ก้อนที่เพื่อนบ้านน้อยที่สุด" (ขอบกอง) แทน
+        pool = [g for g in loose if not self.color or g["class"] == self.color]
+        nb = {id(g): self._neighbors(g, loose) for g in pool}
+        max_nb = C.MAX_NEIGHBORS
+        if pool and min(nb.values()) > max_nb:
+            max_nb = min(nb.values())
         cands = []
         for g in loose:
             if self.color and g["class"] != self.color:
                 continue                      # กระบะมีของสี self.color อยู่ ต้องสีเดิม
-            if self._neighbors(g, loose) > C.MAX_NEIGHBORS:
+            if nb[id(g)] > max_nb:
                 continue
             zx, zy = self.zones[g["class"]]
             cost = nav.dist(ax, ay, *g["cm"]) + 0.7 * nav.dist(*g["cm"], zx, zy)
@@ -437,7 +452,9 @@ class Planner:
             self._drive(0, 0)
             if self.in_state() < C.T_VERIFY:
                 return "VERIFY_PICK ..."
-            still = self.tracker.still_there(self.pick_pos, self.target["class"], tol=6.0)
+            # v4.1: tol 6 -> 3.5 (ในกองแน่น เพื่อนบ้านสีเดียวกันอยู่ใน 6 cm เสมอ -> เคยตัดสินว่า "ยังอยู่" ทั้งที่หยิบได้แล้ว
+            #       แล้วหุ่นถือหินไปหยิบซ้ำ)  หินที่หนีบพลาดจริงจะอยู่ที่เดิมภายใน ~2-3 cm
+            still = self.tracker.still_there(self.pick_pos, self.target["class"], tol=3.5)
             # v4.1: "ถูกดัน" = track เดิม (ก้อนเดียวกัน) ยังเห็นอยู่ แต่ขยับไปจากจุดหนีบ และไม่ได้อยู่ในปาก
             #       (v4.0 ใช้ "สีเดียวกันใน 18 cm" ซึ่งในกองหินเป็นจริงเสมอ -> ไม่เคยนับว่าหนีบได้เลย)
             pushed = None
