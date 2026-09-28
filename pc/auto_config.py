@@ -20,10 +20,10 @@ GRIP_REACH_CM     = 13.0   # กลางเพลา -> จุดกึ่ง�
                             # v2: ไม่มีกระบะแล้ว ใช้ค่านี้ค่าเดียวทั้งตอนหยิบ
                             # เม็ดอัญมณีและตอนเข้าโซนสีตอนปล่อย (ตัดBIN_REACH_CM ทิ้ง)
 ROBOT_FRONT_CM      = 20.0 # กลางเพลา -> ปลายปากหนีบ + หินที่หนีบ (= GRIP_REACH + ~3.5)  TODO วัด
-ROBOT_REAR_CM       = 7.6  # กลางเพลา -> จุดท้ายสุดของหุ่น (ด้านหลัง)  TODO วัด
-ROBOT_BODY_FRONT_CM = 7.3  # กลางเพลา -> ขอบหน้าของฐานกลม (ฐาน Ø150 -> ~7.5)
+ROBOT_REAR_CM       = 8  # กลางเพลา -> จุดท้ายสุดของหุ่น (ด้านหลัง)  TODO วัด
+ROBOT_BODY_FRONT_CM = 8  # กลางเพลา -> ขอบหน้าของฐานกลม (ฐาน Ø150 -> ~7.5)
 ROBOT_BODY_R_CM     = 10.0  # ครึ่งความกว้างตัวหุ่น (ล้อถึงล้อ 10.5 + ยาง)
-ARM_R_CM            = 4.5   # ครึ่งความกว้างของแขนปากหนีบ (ตัด blob สีฟ้าของแขนออกจาก gem)
+ARM_R_CM            = 13   # ครึ่งความกว้างของแขนปากหนีบ (ตัด blob สีฟ้าของแขนออกจาก gem)
 # บริเวณตัดตัวหุ่นออกจากรายการ gem = แคปซูล 2 ท่อน (ตัวหุ่นกว้าง + แขนแคบ)
 # ทำให้ยังเห็นหินบนพื้นที่อยู่ห่างปากเกิน ARM_R_CM -> หุ่นเล็งหินได้จนถึงจังหวะหนีบ
 
@@ -110,3 +110,17 @@ COLOR_PRIORITY = []         # เช่น ["LIME_GREEN", "MARIGOLD_ACCENT", "DE
 SKIP_COLORS    = []         # สีที่ calibrate แล้วยังสับสน ให้ข้าม
 
 LOOP_HZ = 20
+
+# ---- v4.7 ค่าที่จูนจากแอป (gembot_app ขั้น 7 "จูนวง") ----
+# ถ้ามีไฟล์ grip_calib.json ข้างไฟล์นี้ จะเอาค่าในนั้นมาทับค่าข้างบน (เฉพาะชื่อที่มีอยู่แล้ว)
+# ลบไฟล์ = กลับเป็นค่าในไฟล์นี้ทันที
+try:
+    import json as _json, os as _os
+    _p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "grip_calib.json")
+    if _os.path.exists(_p):
+        with open(_p, "r", encoding="utf-8") as _f:
+            for _k, _v in _json.load(_f).items():
+                if _k in globals() and isinstance(_v, (int, float)):
+                    globals()[_k] = _v
+except Exception as _e:
+    print("[CONFIG] grip_calib.json อ่านไม่ได้:", _e)

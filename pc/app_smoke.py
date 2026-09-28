@@ -3,7 +3,7 @@ import os, json, shutil
 import cv2, numpy as np
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 # à¸à¸±à¸™à¹„à¸Ÿà¸¥à¹Œà¸ˆà¸£à¸´à¸‡à¹€à¸ªà¸µà¸¢à¸«à¸²à¸¢: à¸ªà¸³à¸£à¸­à¸‡à¹„à¸§à¹‰à¸à¹ˆà¸­à¸™
-for f in ("field_map.json", "color_profiles.json", "app_state.json"):
+for f in ("field_map.json", "color_profiles.json", "app_state.json", "grip_calib.json"):
     if os.path.exists(f): shutil.copy(f, f + ".bak_smoke")
 
 import gembot_app as A
@@ -71,7 +71,46 @@ print("checklist:", [(n, ok) for n, ok, _ in app.checklist()])
 cv2.imwrite("app_smoke_out.png", out)
 # F-key mapping sanity
 print("F3 ->", A.KEY_F.get(0x700000 + 2 * 0x10000))
+
+# ---- ขั้น 7 จูนวง ----
+import math, nav, auto_config as C
+if os.path.exists("grip_calib.json"): os.remove("grip_calib.json")
+app.handle_key(0x700000 + 6 * 0x10000)      # F7
+assert app.step == 6, app.step
+app.update_robot(); app.update_gems(force=True)
+assert app.pstat == "OK", "smoke: robot tag not seen"
+ax, ay, th = nav.axle_pose(app.pose)
+gp0 = app.calib.to_pixel(nav.gripper_point(ax, ay, th))
+base = C.GRIP_REACH_CM
+app.tune_sel = 0
+app.handle_key(A.KEY_RIGHT); app.handle_key(A.KEY_RIGHT)          # +1.0 cm
+assert abs(C.GRIP_REACH_CM - base - 1.0) < 1e-6, C.GRIP_REACH_CM
+gp1 = app.calib.to_pixel(nav.gripper_point(ax, ay, th))
+moved = math.hypot(gp1[0] - gp0[0], gp1[1] - gp0[1])
+print(f"tune: GRIP_REACH {base} -> {C.GRIP_REACH_CM}, red dot moved {moved:.1f} px (expect ~5)")
+assert 3.0 < moved < 7.0, moved
+app.render()
+# วัดอัตโนมัติ: หินปลอมที่ fwd=15, lat=+1 เทียบเพลา
+off0 = C.HEADING_OFFSET_DEG
+r = math.radians(th)
+fake = (ax + 15 * math.cos(r) - 1 * math.sin(r), ay + 15 * math.sin(r) + 1 * math.cos(r))
+app.gems = [{"cm": fake, "px": app.calib.to_pixel(fake), "class": "LIME_GREEN", "area": 100.0}]
+app.handle_key(ord('a'))
+for _ in range(30): app.tune_measure_tick()
+print(f"auto-measure: GRIP_REACH {C.GRIP_REACH_CM}  HEADING_OFFSET {off0} -> {C.HEADING_OFFSET_DEG}")
+assert abs(C.GRIP_REACH_CM - math.hypot(15, 1)) < 0.05, C.GRIP_REACH_CM
+assert abs(nav.norm_deg(C.HEADING_OFFSET_DEG - off0) - math.degrees(math.atan2(1, 15))) < 0.1
+assert app.measuring is False
+app.render()
+app.handle_key(ord('s'))
+assert os.path.exists("grip_calib.json") and not app.tune_dirty
+print("grip_calib.json:", json.load(open("grip_calib.json")))
+app.handle_key(ord('r'))
+assert abs(C.GRIP_REACH_CM - math.hypot(15, 1)) < 0.05      # R = กลับค่าที่บันทึกล่าสุด
+out = app.render(); cv2.imwrite("app_smoke_tune.png", out)
+app.handle_key(A.KEY_ENTER); assert app.step == 5
+os.remove("grip_calib.json")
 # à¸„à¸·à¸™à¹„à¸Ÿà¸¥à¹Œà¸ˆà¸£à¸´à¸‡
-for f in ("field_map.json", "color_profiles.json", "app_state.json"):
+for f in ("field_map.json", "color_profiles.json", "app_state.json", "grip_calib.json"):
     if os.path.exists(f + ".bak_smoke"): shutil.move(f + ".bak_smoke", f)
 print("SMOKE OK")

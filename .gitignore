@@ -8,3 +8,4 @@ pc/gesture_recognizer.task
 
 pc/app_smoke_*.png
 pc/app_state.json
+pc/grip_calib.json

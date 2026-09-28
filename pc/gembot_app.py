@@ -3,10 +3,10 @@
     python gembot_app.py            (จำกล้องตัวล่าสุดไว้ใน app_state.json)
 
 ขั้นตอน (แถบบนจอ)  1 กล้อง  2 ครอบสนาม  3 วง 6 สี  4 สีหิน  5 หุ่น  6 พร้อม
-ปุ่มร่วมทุกขั้น     Enter = ถัดไป   Backspace = ย้อน   R = ทำขั้นนี้ใหม่   F1-F6 = กระโดดไปขั้น   Q = ออก
+ปุ่มร่วมทุกขั้น     Enter = ถัดไป   Backspace = ย้อน   R = ทำขั้นนี้ใหม่   F1-F7 = กระโดดไปขั้น (F7 = จูนวง/ระยะปาก)   Q = ออก
 เมาส์              ใช้แค่คลิกจุด (มุมสนาม / กลางวง / หิน)
 
-ไฟล์ที่ผลิต:  field_map.json (ขั้น 2-3)   color_profiles.json (ขั้น 4)   app_state.json (กล้อง)
+ไฟล์ที่ผลิต:  field_map.json (ขั้น 2-3)   color_profiles.json (ขั้น 4)   app_state.json (กล้อง)   grip_calib.json (ขั้น 7 จูนวง)
 โปรแกรมเดิม (field_vision / calibrate_colors / test_follow / auto_main) ยังใช้แยกได้เหมือนเดิม
 แอปนี้ไม่แตะ planner / nav / auto_config — ตอนกด SPACE ในขั้น 6 จะเปิด auto_main.py ให้ (แยกโปรเซส)
 ทดสอบโดยไม่มีกล้อง:  python gembot_app.py field.png   (ใช้รูปนิ่งแทนกล้อง)
@@ -29,12 +29,29 @@ from field_vision import (FieldCalibration, detect_zones_auto, detect_gems, reso
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "app_state.json")
 WIN = "GEMBOT"
-STEPS = ["กล้อง", "ครอบสนาม", "วง 6 สี", "สีหิน", "หุ่น", "พร้อม"]
+STEPS = ["กล้อง", "ครอบสนาม", "วง 6 สี", "สีหิน", "หุ่น", "พร้อม", "จูนวง"]
+NSTEP = len(STEPS)
+CALIB_PATH = os.path.join(HERE, "grip_calib.json")
+# ขั้น 7: ค่าที่จูนได้ (ชื่อใน auto_config, ขั้นปรับ, คำอธิบาย)
+TUNE = [
+    ("GRIP_REACH_CM",       0.5, "เพลา -> ก้นปาก (วงแดง)"),
+    ("HEADING_OFFSET_DEG",  1.0, "มุมชดเชยหัว (ลูกศร)"),
+    ("MARKER_TO_AXLE_CM",   0.5, "กลาง tag -> เพลา (+หน้า)"),
+    ("JAW_TIP_CM",          0.5, "เพลา -> ปลายก้าม"),
+    ("JAW_OPEN_HALF_CM",    0.5, "ครึ่งความกว้างก้ามอ้า"),
+    ("ROBOT_BODY_R_CM",     0.5, "รัศมีตัวรถ (วงใหญ่)"),
+    ("ROBOT_BODY_FRONT_CM", 0.5, "เพลา -> ขอบหน้าฐาน"),
+    ("ROBOT_REAR_CM",       0.5, "เพลา -> ท้ายรถ"),
+    ("ARM_R_CM",            0.5, "รัศมีโคนแขน (วงเล็ก)"),
+    ("ROBOT_FRONT_CM",      0.5, "เพลา -> จุดหน้าสุด (กันชนกำแพง)"),
+    ("TAG_HEIGHT_CM",       0.5, "ความสูง tag (แก้ parallax)"),
+]
+KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = 0x260000, 0x280000, 0x250000, 0x270000
 COLOR_TH = {"IRIDESCENT_VIOLET": "ม่วง", "NEON_CYAN": "ฟ้าอ่อน", "DEEP_CRIMSON": "แดง",
             "MARIGOLD_ACCENT": "ส้ม", "DEEP_SKY_BLUE": "น้ำเงิน", "LIME_GREEN": "เขียว"}
 KEY_ENTER, KEY_BACK, KEY_ESC = 13, 8, 27
 KEY_FIX = 0x7f0000                 # ปุ่มเสมือน: ไปขั้นแรกที่ยังไม่ผ่าน
-KEY_F = {0x700000 + i * 0x10000: i for i in range(6)}   # F1..F6 จาก cv2.waitKeyEx บน Windows
+KEY_F = {0x700000 + i * 0x10000: i for i in range(NSTEP)}   # F1..F7 จาก cv2.waitKeyEx บน Windows
 
 
 def load_state():
@@ -118,6 +135,12 @@ class App:
         self.arrived = False
         self.auto_proc = None
         self.tick = 0
+        # ขั้น 7 จูนวง
+        self.tune_sel = 0
+        self.tune_base = {k: float(getattr(C, k)) for k, _, _ in TUNE}   # ค่าตอนเปิดแอป (ไว้กด R)
+        self.tune_dirty = False
+        self.meas = []                    # ตัวอย่างวัดอัตโนมัติ (fwd, lat) cm
+        self.measuring = False
         self.have_all = self.corners is not None and len(self.zones) == 6 and os.path.exists("color_profiles.json")
 
     # ---------- กล้อง ----------
@@ -167,10 +190,10 @@ class App:
 
     # ---------- เปลี่ยนขั้น ----------
     def goto(self, s):
-        s = max(0, min(5, s))
+        s = max(0, min(NSTEP - 1, s))
         if s == 2 and self.calib is not None and not self.zones:
             self.auto_zones()
-        if s in (4, 5) and self.tracker is None and self.calib is not None:
+        if s in (4, 5, 6) and self.tracker is None and self.calib is not None:
             self.tracker = RobotTracker(marker_id=C.ARUCO_ID, dict_name=getattr(cv2.aruco, C.ARUCO_DICT),
                                         calib=self.calib, cam_height_cm=C.CAM_HEIGHT_CM,
                                         tag_height_cm=C.TAG_HEIGHT_CM)
@@ -264,6 +287,109 @@ class App:
         except Exception:
             pass
 
+    # ---------- ขั้น 7 จูนวง ----------
+    def tune_set(self, name, val):
+        setattr(C, name, round(float(val), 2))
+        self.tune_dirty = True
+        if name == "TAG_HEIGHT_CM" and self.tracker is not None and C.CAM_HEIGHT_CM > 0:
+            self.tracker.parallax_k = (C.CAM_HEIGHT_CM - C.TAG_HEIGHT_CM) / C.CAM_HEIGHT_CM
+
+    def tune_adjust(self, d):
+        name, step, _ = TUNE[self.tune_sel]
+        self.tune_set(name, getattr(C, name) + d * step)
+        self.msg = f"{name} = {getattr(C, name):g}"
+
+    def tune_reset(self):
+        for k, v in self.tune_base.items():
+            self.tune_set(k, v)
+        self.tune_dirty = False; self.meas = []
+        self.msg = "กลับเป็นค่าตอนเปิดแอป"
+
+    def tune_save(self):
+        data = {k: getattr(C, k) for k, _, _ in TUNE}
+        with open(CALIB_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        self.tune_base = dict(data); self.tune_dirty = False
+        self.msg = "บันทึก grip_calib.json แล้ว (auto_main จะใช้ค่านี้)"
+
+    def jaw_sample(self):
+        """หินที่อยู่ใกล้จุดปากที่สุด (ภายใน 12 cm) -> (fwd, lat) เทียบเพลา หรือ None"""
+        if self.pose is None or "cm" not in self.pose or self.pstat != "OK":
+            return None
+        ax, ay, th = nav.axle_pose(self.pose)
+        gp = nav.gripper_point(ax, ay, th)
+        best, bd = None, 12.0
+        for g in self.gems:
+            cm = g["cm"] if "cm" in g else self.calib.to_field(g["px"])
+            d = nav.dist(*cm, *gp)
+            if d < bd:
+                best, bd = cm, d
+        if best is None:
+            return None
+        r = math.radians(th); dx, dy = best[0] - ax, best[1] - ay
+        return (dx * math.cos(r) + dy * math.sin(r), -dx * math.sin(r) + dy * math.cos(r))
+
+    def tune_measure_tick(self):
+        """เก็บตัวอย่างต่อเฟรมตอนกด A จนครบ 30 แล้วคำนวณ GRIP_REACH / HEADING_OFFSET"""
+        s = self.jaw_sample()
+        if s is None:
+            self.msg = f"วัด... ไม่เห็นหินที่ปาก ({len(self.meas)}/30) วางหิน 1 ก้อนที่ก้นปากหนีบ"
+            return
+        self.meas.append(s)
+        self.msg = f"วัด... {len(self.meas)}/30"
+        if len(self.meas) < 30:
+            return
+        fw = float(np.median([m[0] for m in self.meas])); la = float(np.median([m[1] for m in self.meas]))
+        self.meas = []
+        reach = math.hypot(fw, la)
+        off = math.degrees(math.atan2(la, fw))
+        self.tune_set("GRIP_REACH_CM", reach)
+        self.tune_set("HEADING_OFFSET_DEG", nav.norm_deg(C.HEADING_OFFSET_DEG + off))
+        self.measuring = False
+        self.msg = (f"วัดได้: GRIP_REACH {reach:.1f} cm, หัวเบี้ยว {off:+.1f}° -> "
+                    f"HEADING_OFFSET {C.HEADING_OFFSET_DEG:g}  (ดูวงแดงตรงหินไหม แล้วกด S)")
+
+    def draw_tune(self, out):
+        """วาดแคปซูลตัวรถ/แขน + ก้าม + วงแดง ด้วยค่าที่กำลังจูน"""
+        if self.pose is None or self.calib is None or "cm" not in self.pose:
+            return
+        ax, ay, th = nav.axle_pose(self.pose)
+        P = self.calib.to_pixel
+        def rpx(pt, r):
+            a = P(pt); b = P((pt[0] + r, pt[1])); return max(1, int(math.hypot(a[0] - b[0], a[1] - b[1])))
+        sel = TUNE[self.tune_sel][0]
+        col_body = (0, 220, 255) if sel in ("ROBOT_BODY_R_CM", "ROBOT_BODY_FRONT_CM", "ROBOT_REAR_CM") else (90, 90, 90)
+        col_arm = (0, 220, 255) if sel == "ARM_R_CM" else (90, 90, 90)
+        for (p0, p1, r), col in zip(nav.robot_capsules(self.pose), (col_body, col_arm)):
+            a, b, rr = P(p0), P(p1), rpx(p1, r)
+            cv2.circle(out, a, rr, col, 2, cv2.LINE_AA); cv2.circle(out, b, rr, col, 2, cv2.LINE_AA)
+            cv2.line(out, a, b, col, 1, cv2.LINE_AA)
+        # ก้าม: จากขอบหน้าฐานถึง JAW_TIP กว้าง +-JAW_OPEN_HALF
+        half = getattr(C, "JAW_OPEN_HALF_CM", 7.0); tip = getattr(C, "JAW_TIP_CM", 20.0)
+        rt = math.radians(th); lx, ly = -math.sin(rt), math.cos(rt)
+        f0 = nav.point_ahead(ax, ay, th, C.ROBOT_BODY_FRONT_CM); f1 = nav.point_ahead(ax, ay, th, tip)
+        quad = np.array([P((f0[0] + lx * half, f0[1] + ly * half)), P((f1[0] + lx * half, f1[1] + ly * half)),
+                         P((f1[0] - lx * half, f1[1] - ly * half)), P((f0[0] - lx * half, f0[1] - ly * half))], np.int32)
+        col_jaw = (0, 220, 255) if sel in ("JAW_TIP_CM", "JAW_OPEN_HALF_CM") else (200, 120, 0)
+        cv2.polylines(out, [quad], True, col_jaw, 2, cv2.LINE_AA)
+        # จุดหน้าสุด
+        fp = P(nav.point_ahead(ax, ay, th, C.ROBOT_FRONT_CM))
+        cv2.drawMarker(out, fp, (0, 220, 255) if sel == "ROBOT_FRONT_CM" else (200, 200, 200), cv2.MARKER_TILTED_CROSS, 14, 2)
+        # เพลา + ลูกศร + วงแดง (ปาก)
+        a = P((ax, ay))
+        cv2.drawMarker(out, a, (255, 255, 255), cv2.MARKER_CROSS, 16, 2)
+        cv2.arrowedLine(out, a, P(nav.point_ahead(ax, ay, th, 20)), (0, 255, 0), 3, tipLength=0.3, line_type=cv2.LINE_AA)
+        gp = P(nav.gripper_point(ax, ay, th))
+        cv2.circle(out, gp, rpx(nav.gripper_point(ax, ay, th), getattr(C, "JAW_CHECK_R_CM", 4.5)), (0, 0, 255), 1, cv2.LINE_AA)
+        cv2.circle(out, gp, 7, (0, 0, 255), -1, cv2.LINE_AA)
+        # หินที่ใช้วัด
+        s = self.jaw_sample()
+        if s is not None:
+            ax2, ay2, th2 = ax, ay, th
+            r = math.radians(th2)
+            pt = (ax2 + s[0] * math.cos(r) - s[1] * math.sin(r), ay2 + s[0] * math.sin(r) + s[1] * math.cos(r))
+            cv2.circle(out, P(pt), 11, (255, 0, 255), 2, cv2.LINE_AA)
+
     # ---------- checklist ----------
     def checklist(self):
         wifi = bool(self.link is not None and self.link.alive)
@@ -326,7 +452,8 @@ class App:
     def step_done(self, i):
         return [self.still is not None or (self.cap is not None and self.cap.isOpened()),
                 self.calib is not None, len(self.zones) == 6,
-                os.path.exists("color_profiles.json"), self.pstat == "OK", False][i]
+                os.path.exists("color_profiles.json"), self.pstat == "OK", False,
+                os.path.exists(CALIB_PATH) and not self.tune_dirty][i]
 
     def draw_loupe(self, out, x, y, size=180):
         """แว่นขยาย 4x ตรงเมาส์ (ไว้คลิกมุมสนามให้แม่น)"""
@@ -398,10 +525,12 @@ class App:
                     cv2.polylines(f, [np.array(self.clicks[:4], np.int32)], len(self.clicks) >= 4, (0, 200, 255), 1)
         if s >= 2:
             self.draw_zones(f)
-        if s in (3, 5):
+        if s in (3, 5, 6):
             self.draw_gems(f)
         if s in (4, 5):
             self.draw_robot(f)
+        if s == 6:
+            self.draw_tune(f)
         return f
 
     # ---------- แถบขวา ----------
@@ -449,7 +578,25 @@ class App:
                     ("WiFi ถึงหุ่น", "ต่ออยู่" if wifi else "ขาด (ต่อ WiFi GEMBOT)", "ok" if wifi else "bad"), None,
                     ("ทดสอบวิ่ง: กด 1-6 วิ่งไปวงสีนั้น", None, "dim")]
             btns = [("ไปหน้าสรุป", "Enter", KEY_ENTER, "primary"),
+                    ("จูนวง / ระยะปาก", "F7", 0x700000 + 6 * 0x10000, "normal"),
                     ("หยุดหุ่น", "SPACE", ord(' '), "danger")]
+        elif s == 6:
+            seen = self.pstat == "OK" and self.pose is not None and "cm" in self.pose
+            rows = [("ปุ่มขึ้น/ลง เลือกค่า, ซ้าย/ขวา ปรับ (วงขยับทันที)", None, "text"),
+                    ("กล้องเห็นแท็ก", "เห็น" if seen else "ไม่เห็น", "ok" if seen else "bad"), None]
+            for i, (name, step, desc) in enumerate(TUNE):
+                v = getattr(C, name)
+                changed = abs(v - self.tune_base[name]) > 1e-6
+                mark = "> " if i == self.tune_sel else "   "
+                rows.append((f"{mark}{desc}", f"{v:g}" + (" *" if changed else ""),
+                             "key" if i == self.tune_sel else ("warn" if changed else "dim")))
+            rows += [None, ("A = วัดระยะปาก+หัวเบี้ยวเอง (วางหินที่ก้นปาก)", None, "dim"),
+                     ("[ ] = ปรับทีละ 0.1   * = ยังไม่บันทึก", None, "dim"),
+                     ("ลบไฟล์ grip_calib.json = กลับค่าใน auto_config", None, "dim")]
+            btns = [("บันทึกค่า (grip_calib.json)", "S", ord('s'), "primary" if self.tune_dirty else "normal"),
+                    ("วัดอัตโนมัติจากหินที่ปาก", "A", ord('a'), "normal"),
+                    ("กลับค่าเดิม", "R", ord('r'), "normal"),
+                    ("ไปหน้าสรุป", "Enter", KEY_ENTER, "normal")]
         else:
             ok_all = True
             self.check_icons = []
@@ -510,13 +657,14 @@ class App:
             out[cy:cy + ch, cx:cx + cw] = cv2.resize(f, (cw, ch), interpolation=cv2.INTER_AREA)
         rrect(out, cx - 1, cy - 1, cw + 2, ch + 2, ui.COL["line"], r=6, thickness=1)
         # --- stepper ---
-        done = [self.step_done(i) for i in range(6)]
+        done = [self.step_done(i) for i in range(NSTEP)]
         stepper(out, 24, 8, self.CW - self.SIDE - 60, STEPS, self.step, done)
         ui._blit_text(out, [(self.CW - self.SIDE + 12, 22, f"GEMBOT  ·  กล้อง {self.cam}", ui.COL["dim"], 15, False)])
         # --- การ์ดขวา ---
         sx, sy, sw = self.CW - self.SIDE + 12, self.TOP + 8, self.SIDE - 24
         sh = self.CH - self.TOP - self.BOT - 16
-        title = ["1) กล้อง", "2) ครอบสนาม", "3) วง 6 สี", "4) สีหิน — คลิกหิน", "5) หุ่น", "6) พร้อมแข่ง"][self.step]
+        title = ["1) กล้อง", "2) ครอบสนาม", "3) วง 6 สี", "4) สีหิน — คลิกหิน", "5) หุ่น", "6) พร้อมแข่ง",
+                 "7) จูนวง / ระยะปาก"][self.step]
         if self.step == 5:
             title = "6) พร้อมแข่ง" if all(ok for _, ok, _ in self.checklist()) else "6) ยังไม่พร้อม"
         y0 = card(out, sx, sy, sw, sh, title=title)
@@ -533,7 +681,7 @@ class App:
             self.buttons.append(((sx + 16, by, sw - 32, bh), key))
             by -= 8
         # --- แถบล่าง ---
-        keys = [("Enter", "ถัดไป"), ("Backspace", "ย้อน"), ("R", "ทำใหม่"), ("F1-F6", "ไปขั้นที่"), ("Q", "ออก")]
+        keys = [("Enter", "ถัดไป"), ("Backspace", "ย้อน"), ("R", "ทำใหม่"), ("F1-F7", "ไปขั้นที่"), ("Q", "ออก")]
         ui.keybar(out, keys, y=self.CH - self.BOT, size=15)
         return out
 
@@ -623,6 +771,31 @@ class App:
                 self.launch_auto()
             elif k == KEY_ENTER:
                 pass
+        elif s == 6:
+            if k == KEY_UP:
+                self.tune_sel = (self.tune_sel - 1) % len(TUNE)
+            elif k == KEY_DOWN:
+                self.tune_sel = (self.tune_sel + 1) % len(TUNE)
+            elif k == KEY_LEFT:
+                self.tune_adjust(-1)
+            elif k == KEY_RIGHT:
+                self.tune_adjust(+1)
+            elif k in (ord('['), ord(']')):                       # ปรับละเอียด 0.1
+                name = TUNE[self.tune_sel][0]
+                self.tune_set(name, getattr(C, name) + (0.1 if k == ord(']') else -0.1))
+                self.msg = f"{name} = {getattr(C, name):g}"
+            elif k in (ord('a'), ord('A')):
+                self.meas = []; self.measuring = True
+                self.msg = "วัด... วางหิน 1 ก้อนที่ก้นปากหนีบ ให้หุ่นนิ่ง"
+            elif k in (ord('s'), ord('S')):
+                self.tune_save()
+            elif k in (ord('r'), ord('R')):
+                self.tune_reset()
+            elif k == KEY_ENTER:
+                if self.tune_dirty:
+                    self.msg = "ยังไม่บันทึก — กด S ก่อน หรือ R ทิ้งค่า"
+                else:
+                    self.goto(5)
         return True
 
     # ==================================================================
@@ -640,10 +813,12 @@ class App:
         print(__doc__)
         while True:
             self.grab_ok = self.grab()
-            if self.step in (3, 5):
+            if self.step in (3, 5, 6):
                 self.update_gems()
-            if self.step in (4, 5):
+            if self.step in (4, 5, 6):
                 self.update_robot()
+            if self.step == 6 and self.measuring:
+                self.tune_measure_tick()
             # ใช้คลิกค้าง
             if self.clicks and self.step == 2:
                 pt = self.clicks.pop(0)
