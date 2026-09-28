@@ -73,6 +73,7 @@ class Planner:
         self.target = None          # dict ของหินเป้าหมาย
         self.approach = None        # (x, y)
         self.retry = 0
+        self.wiggle = 0             # v4.1: จำนวนครั้งที่ถอยตั้งหลักตอน CREEP (ต่อก้อน)
         self.bin_count = 0
         self.zone_before = 0
         self.delivered = 0
@@ -147,6 +148,24 @@ class Planner:
         เดิมใช้ bin_count>0 อย่างเดียว ทำให้ตอน VERIFY_PICK กล้องยังเห็นหินที่หนีบติดแล้ว
         และตีความว่า 'หินยังอยู่/ถูกดัน' ทุกครั้ง"""
         return self.bin_count > 0 or self.state in ("PICK", "PICK_BACKOFF", "VERIFY_PICK")
+
+    def _rebind_target(self):
+        """v4.1: tracker ลบ track ที่หายเกิน 3 เฟรมทิ้ง แต่ self.target ยังชี้ dict เก่า (miss ค้าง 4, ตำแหน่งแช่แข็ง)
+        -> ถ้า target ไม่ใช่ track ที่ยังมีชีวิต ให้หา track สีเดียวกันที่ใกล้ตำแหน่งเดิม (<= 8 cm) มาแทน"""
+        if self.target is None:
+            return
+        tracks = self.tracker.tracks
+        if any(t is self.target for t in tracks):
+            return
+        best, bd = None, 8.0
+        for t in tracks:
+            if t["class"] != self.target["class"]:
+                continue
+            d = nav.dist(*t["cm"], *self.target["cm"])
+            if d < bd:
+                best, bd = t, d
+        if best is not None:
+            self.target = best
 
     def _rel_to_robot(self, ax, ay, th, cm):
         r = math.radians(th)
@@ -317,6 +336,8 @@ class Planner:
 
         ax, ay, th = nav.axle_pose(pose)
         st = self.state
+        if st in ("GO_APPROACH", "ALIGN", "CREEP", "CREEP_BACK", "BACKOFF"):
+            self._rebind_target()            # v4.1: target ต้องเป็น track ที่ยังมีชีวิต
 
         # ---- รอ sequence ของหุ่น (PICK/DUMP) ----
         if st in ("PICK", "DUMP"):
@@ -341,6 +362,7 @@ class Planner:
             self.target, self.approach = res
             self.color = self.target["class"]
             self.retry = 0
+            self.wiggle = 0
             self._path_reset()
             self._go("GO_APPROACH")
             return f"target {self.color} at {tuple(round(v) for v in self.target['cm'])}"
@@ -357,7 +379,7 @@ class Planner:
 
         if st == "ALIGN":
             want = nav.heading_to(ax, ay, *self.target["cm"])
-            vl, vr, done = nav.turn_to(ax, ay, th, want)
+            vl, vr, done = nav.turn_to_pulsed(ax, ay, th, want, self.in_state())   # v4.1: หมุนเป็นจังหวะ กันเลยมุม
             self._drive(vl, vr)
             if done:
                 self._go("CREEP")
@@ -374,6 +396,14 @@ class Planner:
             fwd, lat = self._rel_to_robot(ax, ay, th, self.target["cm"])
             near = fwd <= C.GRIP_REACH_CM + 4.0 and abs(lat) <= 5.0
             lost = self.target.get("miss", 0) >= 2 and near   # กล้องไม่เห็นหินแล้ว (มักเพราะเข้าไปอยู่ในก้าม)
+            # v4.1: ใกล้แล้วแต่หินเยื้องข้างเกินก้ามจะกิน -> คืบต่อไปก็แค่ดันหิน ถอยตั้งหลักแล้วหันใหม่ (ไม่เกิน 2 ครั้ง/ก้อน)
+            if (not in_jaw and not lost and not done and fwd < C.GRIP_REACH_CM + 6.0
+                    and abs(lat) > 3.5 and self.wiggle < 2):
+                self.wiggle += 1
+                self.log(f"creep misaligned lat={lat:.1f} -> realign {self.wiggle}")
+                self._drive(0, 0)
+                self._go("CREEP_BACK")
+                return "CREEP realign"
             if in_jaw or lost:
                 vl = vr = 0
             self._drive(vl, vr)
@@ -386,6 +416,14 @@ class Planner:
                 self._go("PICK")
             gp = nav.gripper_point(ax, ay, th)
             return f"CREEP gap={nav.dist(*gp, *self.target['cm']):.1f}cm"
+
+        if st == "CREEP_BACK":
+            # v4.1: ถอยสั้น ๆ ให้หินกลับมาอยู่หน้าปากไกลพอ แล้วกลับไป ALIGN หันใหม่
+            self._drive(-C.V_CREEP, -C.V_CREEP)
+            if self.in_state() > 0.8:
+                self._drive(0, 0)
+                self._go("ALIGN")
+            return "CREEP_BACK"
 
         if st == "PICK_BACKOFF":
             # ถอยออกให้จุดที่หินเคยอยู่พ้นบริเวณตัดตัวหุ่น -> กล้องตัดสินได้ว่าหินติดมาหรือยังอยู่ที่พื้น
@@ -417,6 +455,7 @@ class Planner:
                 else:
                     self.log(f"gem still there, retry {self.retry}")
                 if self.retry <= C.PICK_RETRY:
+                    self.wiggle = 0
                     self._go("BACKOFF")
                 else:
                     self.log("give up this gem")
@@ -456,7 +495,7 @@ class Planner:
 
         if st == "ZONE_ALIGN":
             # v2: หันหน้า (ปากหนีบ) เข้าหาวงโดยตรง ไม่มีกระบะให้ต้องหมุนกลับตัวแล้ว
-            vl, vr, done = nav.turn_to(ax, ay, th, self.zone_heading)
+            vl, vr, done = nav.turn_to_pulsed(ax, ay, th, self.zone_heading, self.in_state())
             self._drive(vl, vr)
             if done or self.in_state() > 6:
                 self._go("REVERSE_IN")
@@ -467,7 +506,7 @@ class Planner:
             # ด้วยปากหนีบ ไม่ใช่ถอยด้วยท้ายกระบะเหมือนก่อน
             vl, vr, done = nav.creep_to(ax, ay, th, *self.dump_pt, C.GRIP_REACH_CM, C.GRAB_TOL_CM)
             self._drive(vl, vr)
-            if done or self.in_state() > C.T_CREEP_TIMEOUT:
+            if done or self.in_state() > C.T_CREEP_TIMEOUT * 2:      # v4.1: ทางเข้าวงยาวกว่าทางเข้าหิน (~15-20 cm)
                 self._drive(0, 0)
                 self.link.dump()
                 self._go("DUMP")

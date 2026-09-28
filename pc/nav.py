@@ -20,6 +20,18 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def floor_wheels(vl, vr):
+    """v4.1: มอเตอร์จริงต่ำกว่า WHEEL_MIN_CMD (วัดได้ 15) ล้อไม่หมุนเลย
+    -> คำสั่งล้อที่ไม่ใช่ 0 แต่ต่ำกว่านั้น ดันขึ้นให้ถึงขั้นต่ำ (คงเครื่องหมาย) ไม่งั้นล้อข้างหนึ่งหยุด
+       หุ่นเลี้ยวหักแทนที่จะแก้ทิศเบา ๆ  (ใช้กับ go_to / creep_to เท่านั้น การหมุนอยู่กับที่ใช้ V_TURN_MIN อยู่แล้ว)"""
+    m = getattr(C, "WHEEL_MIN_CMD", 15)
+    def f(v):
+        if v == 0 or abs(v) >= m:
+            return int(v)
+        return int(math.copysign(m, v))
+    return f(vl), f(vr)
+
+
 def axle_pose(pose):
     """
     pose จาก RobotTracker (มี "cm", "angle_cm_deg") = จุดกลาง ArUco
@@ -93,7 +105,24 @@ def filter_robot_blobs(gems_cm, pose, holding=False):
     if pose is None or "cm" not in pose:
         return gems_cm
     caps = robot_capsules(pose, holding)
-    return [g for g in gems_cm if not in_robot(g["cm"], caps)]
+    # v4.1: ช่อง "หน้าปาก" ห้ามตัด — วงตัวหุ่น (r=BODY_R) ยื่นเลยหน้าตัวไปถึง BODY_FRONT+BODY_R (~17 cm)
+    #       ซึ่งครอบที่นั่งหิน (GRIP_REACH 13) พอดี ทำให้ track หินหายตอนคืบเข้าใกล้ -> หนีบอากาศ
+    #       ยกเว้นตอน holding: หินที่นั่งอยู่ที่ปาก (วง 4.5 cm รอบจุดปาก) ต้องตัดออกเหมือนเดิม
+    ax, ay, th = axle_pose(pose)
+    r = math.radians(th)
+    gp = point_ahead(ax, ay, th, C.GRIP_REACH_CM)
+    out = []
+    for g in gems_cm:
+        dx, dy = g["cm"][0] - ax, g["cm"][1] - ay
+        fwd = dx * math.cos(r) + dy * math.sin(r)
+        lat = -dx * math.sin(r) + dy * math.cos(r)
+        if holding and dist(*g["cm"], *gp) <= 4.5:
+            continue
+        if fwd >= C.ROBOT_BODY_FRONT_CM:
+            out.append(g)                  # หน้าตัวหุ่นทั้งแถบ (ปาก/ข้างปาก): เห็นเสมอ
+        elif not in_robot(g["cm"], caps):
+            out.append(g)
+    return out
 
 
 def heading_to(ax, ay, tx, ty):
@@ -120,6 +149,21 @@ def turn_to(ax, ay, th, target_heading):
     return vl, vr, False
 
 
+def turn_to_pulsed(ax, ay, th, target_heading, t_in_state):
+    """v4.1: หมุนอยู่กับที่แบบ "จังหวะ" ตอนใกล้ถึงมุม
+    หมุนต่อเนื่องที่ V_TURN_MIN 48 + กล้อง/WiFi หน่วง ~0.15 วิ = เลยมุมไป 10-20° ทุกครั้ง แล้วหมุนกลับ วนไม่จบ
+    -> error ยังมาก: หมุนต่อเนื่อง / error < 25°: หมุน 0.12 วิ หยุด 0.25 วิ (ให้กล้องเห็นมุมจริงก่อนหมุนต่อ)"""
+    err = norm_deg(target_heading - th)
+    if abs(err) <= C.HEADING_DEADBAND_DEG:
+        return 0, 0, True
+    vl, vr = _turn_cmd(err)
+    if abs(err) <= C.TURN_FIRST_DEG:
+        period, on = 0.37, 0.12
+        if (t_in_state % period) > on:
+            return 0, 0, False
+    return vl, vr, False
+
+
 def go_to(ax, ay, th, tx, ty):
     """ไปให้ "กลางเพลา" ถึงจุด (tx,ty)"""
     d = dist(ax, ay, tx, ty)
@@ -135,7 +179,8 @@ def go_to(ax, ay, th, tx, ty):
     corr = C.TURN_SIGN * err * C.K_TURN * 0.6
     if abs(err) <= C.HEADING_DEADBAND_DEG:
         corr = 0
-    return int(clamp(v + corr, -100, 100)), int(clamp(v - corr, -100, 100)), False
+    vl, vr = floor_wheels(clamp(v + corr, -100, 100), clamp(v - corr, -100, 100))
+    return vl, vr, False
 
 
 def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
@@ -149,6 +194,23 @@ def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
     if d <= tol:
         return 0, 0, True
     forward = tool_offset > 0
+    if forward:
+        # v4.1: ระยะใกล้ใช้ "เยื้องข้าง (lat)" ของเป้าเทียบแนวหุ่น แทนมุมจากเพลา
+        #   เดิม: มุมจากเพลาไปเป้าโตขึ้นเร็วมากตอนใกล้ (เยื้อง 2 cm ที่ 5 cm = 22°) -> เกิน TURN_FIRST
+        #   -> หมุนอยู่กับที่ที่ความเร็ว 48 -> เลยเป้า -> หมุนกลับ -> วนจน timeout แล้วปล่อย/หนีบผิดที่
+        r = math.radians(th)
+        dx, dy = tx - ax, ty - ay
+        fwd = dx * math.cos(r) + dy * math.sin(r)
+        lat = -dx * math.sin(r) + dy * math.cos(r)
+        if fwd <= tool_offset and abs(lat) <= 2 * tol:
+            return 0, 0, True                      # เลยที่นั่งแล้ว (เยื้องพอรับได้) = ถึง
+        if fwd < tool_offset + 12.0:
+            v = C.V_CREEP
+            corr = C.TURN_SIGN * clamp(lat * 2.5, -8, 8)   # เยื้อง 1 cm -> ต่างล้อ 5
+            if abs(lat) <= 0.8:
+                corr = 0
+            vl, vr = floor_wheels(clamp(v + corr, -100, 100), clamp(v - corr, -100, 100))
+            return vl, vr, False
     # ทิศที่ "เครื่องมือ" ต้องไป เทียบกับแนวหุ่น
     want = heading_to(ax, ay, tx, ty)
     if not forward:
@@ -161,9 +223,11 @@ def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
     # หมายเหตุ: ล้อซ้าย>ขวา ทำให้หุ่นหมุนทางเดิมเสมอ ไม่ว่าจะเดินหน้าหรือถอย
     # ดังนั้นสัญญาณแก้ทิศไม่ต้องกลับด้านตอนถอย
     corr = C.TURN_SIGN * err * C.K_TURN * 0.5
-    if abs(err) <= C.HEADING_DEADBAND_DEG:
+    # v4.1: ตอนคืบใช้ deadband แคบกว่าตอนหมุน (ล้อไม่เท่ากันทำให้หุ่นโค้ง ถ้าปล่อยถึง 6° ปากเบี้ยว 2-3 cm)
+    if abs(err) <= getattr(C, "CREEP_DEADBAND_DEG", 2.0):
         corr = 0
-    return int(clamp(v + corr, -100, 100)), int(clamp(v - corr, -100, 100)), False
+    vl, vr = floor_wheels(clamp(v + corr, -100, 100), clamp(v - corr, -100, 100))
+    return vl, vr, False
 
 
 # ---------------------------------------------------------------
