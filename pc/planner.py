@@ -197,6 +197,22 @@ class Planner:
                 out.append(g)
         return out
 
+    def _sweep_count(self, ax, ay, th, target, gems):
+        """v4.4: จำนวนหินก้อนอื่นที่ 'ปลายก้ามที่อ้าอยู่' จะกวาดผ่านตอนคืบจาก (ax,ay) ไปหา target
+        แถบกว้าง +-JAW_OPEN_HALF_CM ยาวถึง JAW_TIP_CM + ระยะคืบ (ไม่นับที่อยู่ในช่องหนีบ |lat|<4 ซึ่ง _front_blockers ดูแล้ว)"""
+        half = getattr(C, "JAW_OPEN_HALF_CM", 7.0)
+        tip = getattr(C, "JAW_TIP_CM", 20.0)
+        tf, _ = self._rel_to_robot(ax, ay, th, target["cm"])
+        reach = tf - C.GRIP_REACH_CM + tip              # ปลายก้ามไปถึงไหนตอนหินเข้าที่นั่ง
+        n = 0
+        for g in gems:
+            if g is target:
+                continue
+            f, l = self._rel_to_robot(ax, ay, th, g["cm"])
+            if C.ROBOT_BODY_FRONT_CM < f < reach and 4.0 <= abs(l) < half + 2.5:
+                n += 1
+        return n
+
     def _pre_point(self, ap, target_cm, back_cm=10.0):
         """v4.1j: จุดก่อนถึงจุดตั้งต้น ถอยจาก ap ไปทางตรงข้ามเป้า back_cm
         -> หุ่นมาถึง ap โดยหันหน้าหาเป้าอยู่แล้ว ALIGN แทบไม่ต้องหมุน (ก้ามอ้าไม่กวาดหิน/วงรอบ ๆ)"""
@@ -372,7 +388,9 @@ class Planner:
             th_g = nav.heading_to(*ap, *g["cm"])
             if not self._front_blockers(ap[0], ap[1], th_g, g, gems):
                 # v4.1j: ในบรรดามุมที่ "โล่ง" เลือกจุดที่หุ่นเดินไปถึงใกล้ที่สุด (มุมนอกกองได้แต้มต่อ 8 cm)
-                score = nav.dist(ax, ay, *ap) + abs(off) / 30.0 * 8.0
+                # v4.4: + หินที่ปลายก้ามอ้าจะกวาดผ่าน ก้อนละ 15 cm (ก้ามจริงกว้างกว่าช่องหนีบ)
+                score = nav.dist(ax, ay, *ap) + abs(off) / 30.0 * 8.0 \
+                    + 15.0 * self._sweep_count(ap[0], ap[1], th_g, g, gems)
                 if best is None or score < best[0]:
                     best = (score, ap)
         if best is not None:

@@ -125,9 +125,20 @@ class App:
         if self.still is not None:                      # โหมดรูปนิ่ง (ทดสอบ)
             return True
         if self.cap is not None:
-            self.cap.release()
-        self.cap, _ = open_source(str(idx))
-        ok = self.cap is not None and self.cap.isOpened()
+            self.cap.release(); self.cap = None
+            time.sleep(0.4)                              # DirectShow ปล่อยกล้องช้า
+        ok = False
+        for attempt in range(3):                          # กล้อง USB บางตัวเปิดครั้งแรกไม่ติด
+            self.cap, _ = open_source(str(idx))
+            ok = self.cap is not None and self.cap.isOpened() and self.cap.read()[0]
+            if ok:
+                break
+            if self.cap is not None:
+                self.cap.release(); self.cap = None
+            time.sleep(0.6)
+        if not ok:
+            self.msg = (f"เปิดกล้อง {idx} ไม่ได้ — ถ้ามี auto_main / field_vision / calibrate เปิดอยู่ ให้ปิดก่อน "
+                        f"(กล้องหนึ่งตัวใช้ได้ทีละโปรแกรม)")
         if ok:
             self.cam = idx
             self.state["cam"] = idx; save_state(self.state)
