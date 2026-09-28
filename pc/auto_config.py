@@ -32,12 +32,12 @@ TURN_SIGN     = +1          # ถ้าหุ่นหมุน "หนี" เ�
 K_TURN        = 0.8         # ความเร็วหมุนต่อ 1 องศา error
 K_DIST        = 1.5         # ความเร็วต่อ 1 cm ระยะ (ก่อน clamp)
 V_MAX         = 30          # ความเร็วสูงสุด (-100..100)
-V_MIN         = 10          # ต่ำสุด (MOTOR_MIN_PWM ใน config.h ต้องเป็นค่าที่ล้อเริ่มหมุนจริง ~140 แล้วค่านี้ไม่ต้องสูง)
-V_TURN_MAX    = 22
-V_TURN_MIN    = 12
-V_CREEP       = 12          # ความเร็วตอนคืบเข้าหาหิน/ถอยเข้าวง
+V_MIN         = 18          # ต่ำสุด (MOTOR_MIN_PWM ใน config.h ต้องเป็นค่าที่ล้อเริ่มหมุนจริง ~140 แล้วค่านี้ไม่ต้องสูง)
+V_TURN_MAX    = 55
+V_TURN_MIN    = 48
+V_CREEP       = 20          # ความเร็วตอนคืบเข้าหาหิน/ถอยเข้าวง
 TURN_FIRST_DEG  = 25        # error มากกว่านี้ -> หมุนอยู่กับที่ก่อน
-HEADING_DEADBAND_DEG = 4
+HEADING_DEADBAND_DEG = 6
 ARRIVE_TOL_CM   = 4.0
 SLOWDOWN_CM     = 25.0
 
