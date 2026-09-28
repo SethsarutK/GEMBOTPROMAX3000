@@ -695,9 +695,16 @@ def open_source(source, width=1280, height=720, exposure=None):
                 else cv2.VideoCapture(int(source))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if not cap.isOpened():
+            # กล้องไม่มี / ถูกโปรแกรมอื่นจับอยู่ -> คืน cap ที่ปิดอยู่ให้ผู้เรียกเช็ค isOpened() เอง (ห้าม getBackendName)
+            print(f"[CAM] เปิดกล้อง {source} ไม่ได้ (ไม่มี หรือโปรแกรมอื่นใช้อยู่)")
+            return cap, None
         lock_camera(cap, exposure)
-        print(f"[CAM] {cap.get(cv2.CAP_PROP_FRAME_WIDTH):.0f}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT):.0f}  "
-              f"backend={cap.getBackendName()}")
+        try:
+            be = cap.getBackendName()
+        except cv2.error:
+            be = "?"
+        print(f"[CAM] {cap.get(cv2.CAP_PROP_FRAME_WIDTH):.0f}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT):.0f}  backend={be}")
         return cap, None
     ext = os.path.splitext(str(source))[1].lower()
     if ext in (".png", ".jpg", ".jpeg", ".bmp"):
