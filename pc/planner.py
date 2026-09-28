@@ -92,6 +92,7 @@ class Planner:
         self.contested = 0          # v4.1: ก้อนเป้าปัจจุบันโดน "ก้ามมีก้อนอื่นขวาง" มากี่ครั้ง
         self.contested_at = None
         self.creep_settle = None    # v4.1g: เวลาที่เริ่ม "นิ่งดูซ้ำ" ก่อนหนีบ
+        self.zone_filled = set()    # v4.1h: สีของวงที่เราปล่อยหินไปแล้ว (ห้ามขับทับ/หมุนในวงพวกนี้)
         self._last_cmd = (0, 0)
         self.path = []              # waypoint ที่เหลือ (cm) ตอน GO_APPROACH / GO_ZONE_AP
         self.path_t = 0.0
@@ -217,14 +218,39 @@ class Planner:
         return best
 
     # ---------- หลบหิน (v3.8) ----------
+    def _filled_zones(self, gems):
+        """v4.1h: วงที่มีหินอยู่แล้ว (เห็นจากกล้อง หรือเราเคยปล่อยไว้) -> ห้ามขับทับ/หมุนในวง"""
+        names = set(self.zone_filled)
+        for g in gems:
+            z = self._in_zone(g["cm"])
+            if z:
+                names.add(z)
+        return [self.zones[n] for n in names if n in self.zones]
+
+    def _keep_out_of_zones(self, pt, gems):
+        """v4.1h: ถ้าจุด (approach) อยู่ในวงที่มีหินแล้ว ให้เลื่อนออกไปนอกวง + รัศมีตัวหุ่น"""
+        x, y = pt
+        for zx, zy in self._filled_zones(gems):
+            need = self.zr + C.ROBOT_BODY_R_CM
+            d = nav.dist(x, y, zx, zy)
+            if d < need:
+                ux, uy = ((x - zx) / d, (y - zy) / d) if d > 0.1 else (1.0, 0.0)
+                x, y = zx + ux * need, zy + uy * need
+        return (min(max(x, 12), 210 - 12), min(max(y, 12), 120 - 12))
+
     def _obstacles(self, gems, exclude=None):
-        """ตำแหน่งหินทุกก้อนที่ต้องหลบ (ยกเว้นก้อนเป้าหมาย)"""
+        """ตำแหน่งหินทุกก้อนที่ต้องหลบ (ยกเว้นก้อนเป้าหมาย) + วงที่มีหินแล้ว (v4.1h)"""
         out = []
         for g in gems:
             if exclude is not None and g["class"] == exclude["class"] \
                     and nav.dist(*g["cm"], *exclude["cm"]) < 4.0:
                 continue
             out.append(g["cm"])
+        for zx, zy in self._filled_zones(gems):
+            out.append((zx, zy))
+            for k in range(8):                       # จุดรอบขอบวง ให้ A* เลี่ยงทั้งวง
+                a = k * math.pi / 4
+                out.append((zx + self.zr * math.cos(a), zy + self.zr * math.sin(a)))
         return out
 
     def _go_via(self, ax, ay, th, goal, gems, exclude=None):
@@ -301,7 +327,7 @@ class Planner:
         if not cands:
             return None
         cands.sort(key=lambda c: c[0])
-        return cands[0][1], cands[0][2]
+        return cands[0][1], self._keep_out_of_zones(cands[0][2], gems)
 
     def _approach_point(self, ax, ay, g, pile, gems=None):
         """จุด approach: ถอยจากหินออก "ด้านนอกกอง" ระยะ reach + standoff
@@ -357,6 +383,11 @@ class Planner:
             back = self.zr + C.GRIP_REACH_CM      # จุดยืนทับกอง -> ยืนชิดขอบวงเลย
             ap = (zx - dx * back, zy - dy * back)
         ap = (min(max(ap[0], 12), 210 - 12), min(max(ap[1], 12), 120 - 12))
+        # v4.1h: จุดยืนหน้าวงต้องไม่ไปตกในวงสีอื่นที่มีหินแล้ว
+        others = [g for g in gems if self._in_zone(g["cm"]) not in (None, color)]
+        saved, self.zone_filled = self.zone_filled, self.zone_filled - {color}
+        ap = self._keep_out_of_zones(ap, others)
+        self.zone_filled = saved
         place_pt = (zx - dx * self.zr * (1 - C.DUMP_DEPTH_FRAC),
                    zy - dy * self.zr * (1 - C.DUMP_DEPTH_FRAC))
         # v4.1g: จุดปล่อยทับหินที่วางไว้แล้ว -> หินเก่าถูกเขี่ยหลุดวง (sim เห็น 1-2 ครั้ง/รอบ)
@@ -477,8 +508,8 @@ class Planner:
             near = fwd <= C.GRIP_REACH_CM + 4.0 and abs(lat) <= 5.0
             lost = self.target.get("miss", 0) >= 2 and near   # กล้องไม่เห็นหินแล้ว (มักเพราะเข้าไปอยู่ในก้าม)
             # v4.1: ใกล้แล้วแต่หินเยื้องข้างเกินก้ามจะกิน -> คืบต่อไปก็แค่ดันหิน ถอยตั้งหลักแล้วหันใหม่ (ไม่เกิน 2 ครั้ง/ก้อน)
-            if (not in_jaw and not lost and not done and fwd < C.GRIP_REACH_CM + 6.0
-                    and abs(lat) > 3.5 and self.wiggle < 2):
+            if (not lost and fwd < C.GRIP_REACH_CM + 6.0
+                    and abs(lat) > 2.8 and self.wiggle < 2):
                 self.wiggle += 1
                 self.log(f"creep misaligned lat={lat:.1f} -> realign {self.wiggle}")
                 self._drive(0, 0)
@@ -578,7 +609,7 @@ class Planner:
                     # v4.0: หินไม่ได้หาย แค่ถูกดันไปข้าง ๆ -> เล็งก้อนที่ตำแหน่งใหม่ ไม่นับว่าหนีบได้
                     self.log(f"gem pushed to {tuple(round(v) for v in pushed['cm'])}, retry {self.retry}")
                     self.target = pushed
-                    self.approach = self._approach_for(ax, ay, pushed)
+                    self.approach = self._keep_out_of_zones(self._approach_for(ax, ay, pushed), gems)
                 else:
                     self.log(f"gem still there, retry {self.retry}")
                 if self.retry <= C.PICK_RETRY:
@@ -662,6 +693,7 @@ class Planner:
             got = max(0, after - self.zone_before)
             self.delivered += got
             self.log(f"placed {self.color}: zone {self.zone_before}->{after}  total={self.delivered}")
+            self.zone_filled.add(self.color)         # v4.1h: วงนี้มีหินแล้ว
             self.bin_count = 0
             self.color = None
             self._go("CHOOSE")

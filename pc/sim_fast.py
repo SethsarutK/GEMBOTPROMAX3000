@@ -200,6 +200,7 @@ ZONES = {"IRIDESCENT_VIOLET": (185, 34), "NEON_CYAN": (132, 18), "DEEP_CRIMSON":
 
 
 def run(seed=3, ideal=False, verbose=True):
+    CLOCK.t = 1000.0                      # ให้ทุกรอบเริ่มเวลาเดียวกัน -> seed เดิมได้ผลเดิมเสมอ
     world = RealWorld(ZONES, ideal=ideal, seed=seed)
     link = RealLink(world)
     lines = []
