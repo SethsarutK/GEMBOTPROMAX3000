@@ -20,6 +20,19 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def steer(v, corr):
+    """v4.2b: แยกคำสั่งสองล้อจากความเร็วฐาน v และค่าแก้ทิศ corr
+    ปกติ = (v+corr, v-corr)  แต่ถ้าล้อช้าจะต่ำกว่า WHEEL_MIN_CMD (ล้อหยุด = เลี้ยวหัก)
+    ให้คงล้อช้าไว้ที่ v แล้วเร่งล้อเร็วเป็น v+2*corr แทน (ผลต่างล้อเท่ากัน หุ่นไม่หยุดล้อ)"""
+    m = getattr(C, "WHEEL_MIN_CMD", 15)
+    if v > 0 and v - abs(corr) < m:
+        a, b = v + 2 * abs(corr), v
+        vl, vr = (a, b) if corr >= 0 else (b, a)
+    else:
+        vl, vr = v + corr, v - corr
+    return floor_wheels(clamp(vl, -100, 100), clamp(vr, -100, 100))
+
+
 def floor_wheels(vl, vr):
     """v4.1: มอเตอร์จริงต่ำกว่า WHEEL_MIN_CMD (วัดได้ 15) ล้อไม่หมุนเลย
     -> คำสั่งล้อที่ไม่ใช่ 0 แต่ต่ำกว่านั้น ดันขึ้นให้ถึงขั้นต่ำ (คงเครื่องหมาย) ไม่งั้นล้อข้างหนึ่งหยุด
@@ -179,7 +192,7 @@ def go_to(ax, ay, th, tx, ty):
     corr = C.TURN_SIGN * err * C.K_TURN * 0.6
     if abs(err) <= C.HEADING_DEADBAND_DEG:
         corr = 0
-    vl, vr = floor_wheels(clamp(v + corr, -100, 100), clamp(v - corr, -100, 100))
+    vl, vr = steer(v, corr)
     return vl, vr, False
 
 
@@ -211,7 +224,7 @@ def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
             corr = C.TURN_SIGN * clamp(lat * 2.5, -8, 8)   # เยื้อง 1 cm -> ต่างล้อ 5
             if abs(lat) <= 0.8:
                 corr = 0
-            vl, vr = floor_wheels(clamp(v + corr, -100, 100), clamp(v - corr, -100, 100))
+            vl, vr = steer(v, corr)
             return vl, vr, False
     # ทิศที่ "เครื่องมือ" ต้องไป เทียบกับแนวหุ่น
     want = heading_to(ax, ay, tx, ty)
@@ -228,7 +241,7 @@ def creep_to(ax, ay, th, tx, ty, tool_offset, tol):
     # v4.1: ตอนคืบใช้ deadband แคบกว่าตอนหมุน (ล้อไม่เท่ากันทำให้หุ่นโค้ง ถ้าปล่อยถึง 6° ปากเบี้ยว 2-3 cm)
     if abs(err) <= getattr(C, "CREEP_DEADBAND_DEG", 2.0):
         corr = 0
-    vl, vr = floor_wheels(clamp(v + corr, -100, 100), clamp(v - corr, -100, 100))
+    vl, vr = steer(v, corr)
     return vl, vr, False
 
 
