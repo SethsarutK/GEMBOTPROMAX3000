@@ -227,7 +227,7 @@ def run_real(args):
             gems_px, n_ambig = resolve_ambiguous(gems_px)
             gems_cm = [{"cm": calib.to_field(g["px"]), "class": g["class"], "area": g["area"], "px": g["px"]} for g in gems_px]
             gems_cm = nav.filter_outside_field(gems_cm)          # ตัดกำแพง/นอกสนาม
-            gems_cm = nav.filter_robot_blobs(gems_cm, pose, holding=pl.bin_count > 0)
+            gems_cm = nav.filter_robot_blobs(gems_cm, pose, holding=pl.holding())   # v4.1: ตัดหินในปากตอนหนีบ/ตรวจผลด้วย
             gems_px = [g for g in gems_px if any(g["px"] == h["px"] for h in gems_cm)]   # วาดเฉพาะที่ไม่ใช่ตัวหุ่น
         fps_n += 1
         if time.time() - fps_t >= 1.0:
@@ -236,7 +236,7 @@ def run_real(args):
         msg = pl.step(pose, pstat, gems_cm)
 
         out = draw_overlay(frame, zones_px, gems_px, pose, calib, None)
-        draw_capsules(out, calib, pose, holding=pl.bin_count > 0)
+        draw_capsules(out, calib, pose, holding=pl.holding())
         # วาดเป้าหมาย/จุด approach
         if pl.target is not None and pl.state not in ("IDLE", "DONE"):
             tp = calib.to_pixel(pl.target["cm"]); cv2.circle(out, tp, 12, (0, 0, 255), 2)

@@ -142,6 +142,17 @@ class Planner:
         lat = -dx * math.sin(r) + dy * math.cos(r)         # เยื้องซ้าย/ขวา
         return (C.GRIP_REACH_CM - 5.0) <= fwd <= (C.GRIP_REACH_CM + 2.0) and abs(lat) <= 3.0
 
+    def holding(self):
+        """v4.1: มีหินอยู่ในปาก (หรือกำลังหนีบ/ตรวจผล) -> ให้ vision ตัดหินตรงปากออก
+        เดิมใช้ bin_count>0 อย่างเดียว ทำให้ตอน VERIFY_PICK กล้องยังเห็นหินที่หนีบติดแล้ว
+        และตีความว่า 'หินยังอยู่/ถูกดัน' ทุกครั้ง"""
+        return self.bin_count > 0 or self.state in ("PICK", "PICK_BACKOFF", "VERIFY_PICK")
+
+    def _rel_to_robot(self, ax, ay, th, cm):
+        r = math.radians(th)
+        dx, dy = cm[0] - ax, cm[1] - ay
+        return dx * math.cos(r) + dy * math.sin(r), -dx * math.sin(r) + dy * math.cos(r)
+
     def _nearest_same(self, cm, cls, within, exclude_cm=None):
         """หาหิน (track ที่ยังเห็นอยู่) สีเดียวกัน ใกล้จุด cm ที่สุดภายในรัศมี within"""
         best, bd = None, within
@@ -359,7 +370,10 @@ class Planner:
             vl, vr, done = nav.creep_to(ax, ay, th, *self.target["cm"], C.GRIP_REACH_CM, C.GRAB_TOL_CM)
             # v4.0: หินเข้ามาอยู่ในโซนก้ามแล้ว = พอ ไม่ต้องคืบต่อ (เดิมคืบต่อจนดันหินเด้งออก)
             in_jaw = self._in_jaw_zone(ax, ay, th, self.target["cm"])
-            lost = self.target.get("miss", 0) >= 2          # กล้องไม่เห็นหินแล้ว (มักเพราะเข้าไปอยู่ในก้าม)
+            # v4.1: "track หาย" นับเฉพาะตอนตำแหน่งล่าสุดอยู่ใกล้ปากแล้ว (ไม่งั้นสีกะพริบตอนยังไกล = หนีบอากาศ)
+            fwd, lat = self._rel_to_robot(ax, ay, th, self.target["cm"])
+            near = fwd <= C.GRIP_REACH_CM + 4.0 and abs(lat) <= 5.0
+            lost = self.target.get("miss", 0) >= 2 and near   # กล้องไม่เห็นหินแล้ว (มักเพราะเข้าไปอยู่ในก้าม)
             if in_jaw or lost:
                 vl = vr = 0
             self._drive(vl, vr)
@@ -386,7 +400,13 @@ class Planner:
             if self.in_state() < C.T_VERIFY:
                 return "VERIFY_PICK ..."
             still = self.tracker.still_there(self.pick_pos, self.target["class"], tol=6.0)
-            pushed = None if still else self._nearest_same(self.pick_pos, self.target["class"], within=18.0)
+            # v4.1: "ถูกดัน" = track เดิม (ก้อนเดียวกัน) ยังเห็นอยู่ แต่ขยับไปจากจุดหนีบ และไม่ได้อยู่ในปาก
+            #       (v4.0 ใช้ "สีเดียวกันใน 18 cm" ซึ่งในกองหินเป็นจริงเสมอ -> ไม่เคยนับว่าหนีบได้เลย)
+            pushed = None
+            if not still and self.target.get("miss", 0) == 0 \
+                    and nav.dist(*self.target["cm"], *self.pick_pos) > 6.0 \
+                    and not self._in_jaw_zone(ax, ay, th, self.target["cm"]):
+                pushed = self.target
             if still or pushed is not None:
                 self.retry += 1
                 if pushed is not None:
