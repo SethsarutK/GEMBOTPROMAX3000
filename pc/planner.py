@@ -507,6 +507,14 @@ class Planner:
             fwd, lat = self._rel_to_robot(ax, ay, th, self.target["cm"])
             near = fwd <= C.GRIP_REACH_CM + 4.0 and abs(lat) <= 5.0
             lost = self.target.get("miss", 0) >= 2 and near   # กล้องไม่เห็นหินแล้ว (มักเพราะเข้าไปอยู่ในก้าม)
+            # v4.1i: ตั้งแต่ v4.1b หินในก้ามยัง "มองเห็น" ได้ (ไม่ถูกตัดแล้ว) -> track หายตอนคืบ = หินถูกดันไปไกล/สีกะพริบ
+            #        ไม่ใช่ "เข้าก้ามแล้ว" -> ห้ามหนีบอากาศ: ถ้า track ตายและหาก้อนแทนไม่ได้ ให้ถอยแล้วเลือกใหม่
+            if self.target.get("miss", 0) >= 3 and not any(t is self.target for t in self.tracker.tracks):
+                self.log("target track lost during creep -> re-choose")
+                self._drive(0, 0)
+                self._go("BACKOFF_SKIP")
+                return "CREEP target lost"
+            lost = False
             # v4.1: ใกล้แล้วแต่หินเยื้องข้างเกินก้ามจะกิน -> คืบต่อไปก็แค่ดันหิน ถอยตั้งหลักแล้วหันใหม่ (ไม่เกิน 2 ครั้ง/ก้อน)
             if (not lost and fwd < C.GRIP_REACH_CM + 6.0
                     and abs(lat) > 2.8 and self.wiggle < 2):
