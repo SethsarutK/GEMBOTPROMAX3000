@@ -54,6 +54,8 @@ class RobotLink:
         vl = max(-100, min(100, int(vl)))
         vr = max(-100, min(100, int(vr)))
         self._cmd = (vl, vr); self._cmd_t = time.time()
+        if self._pending is not None:
+            return                      # v5.0: รอ ack อยู่ อย่าออก seq ใหม่ (เหตุผลเดียวกับใน keepalive)
         self.send(f"M,{vl},{vr},{self._next()}")
 
     def stop(self):
@@ -65,7 +67,10 @@ class RobotLink:
         while self._run:
             time.sleep(0.05)
             try:
-                if time.time() - self._cmd_t > 0.045:
+                # v5.0: ระหว่างรอ ack ของ PICK/DUMP ห้ามส่ง M (seq ใหม่กว่าจะทำให้ ack ปลอม:
+                # PICK หาย 1 แพ็กเก็ต แล้ว M ตัวถัดไปถูก ESP32 รายงาน seq >= ที่รอ -> PC คิดว่าหนีบแล้ว)
+                # ตัว resend ใน tick() ส่งทุก 0.3 วิ เลี้ยง watchdog 500 ms ของหุ่นอยู่แล้ว
+                if self._pending is None and time.time() - self._cmd_t > 0.045:
                     vl, vr = self._cmd
                     self.send(f"M,{vl},{vr},{self._next()}")
                     self._cmd_t = time.time()
