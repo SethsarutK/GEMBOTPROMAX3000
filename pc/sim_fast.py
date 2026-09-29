@@ -211,6 +211,10 @@ class RealWorld(auto_main.SimWorld):
             if t <= want:
                 x, y, th = p; break
         self.hist = self.hist[-40:]
+        # v5.0 bugfix: "cm" ต้องเป็นตำแหน่ง "แท็ก" (เหมือน SimWorld.pose) ไม่ใช่เพลาตรง ๆ
+        # ไม่งั้น nav.axle_pose บวก MARKER_TO_AXLE ซ้ำ -> geometry จริง (offset != 0) เพี้ยนทั้งระบบ
+        r = math.radians(th)
+        x -= C.MARKER_TO_AXLE_CM * math.cos(r); y -= C.MARKER_TO_AXLE_CM * math.sin(r)
         x += random.gauss(0, self.POS_NOISE * 0.5); y += random.gauss(0, self.POS_NOISE * 0.5)
         th = nav.norm_deg(th + random.gauss(0, self.ANG_NOISE * 0.5))
         return {"cm": (x, y), "angle_cm_deg": th, "px": (0, 0), "angle_deg": th}
