@@ -720,6 +720,13 @@ class Planner:
                         self._go("CHOOSE")
                     return f"GO_APPROACH(pre) d={nav.dist(ax, ay, *self.pre_pt):.0f}cm"
             vl, vr, done = self._go_via(ax, ay, th, self.approach, gems, exclude=self.target)
+            # v5.5 [req2]: ล็อคเป้าใกล้แล้วชะลอ ไม่พุ่งใส่จนหินถลำลึก/หลุดสายตากล้อง
+            if self.target is not None and \
+                    nav.dist(ax, ay, *self.target["cm"]) < getattr(C, "APPROACH_SLOW_CM", 35.0):
+                cap = getattr(C, "V_APPROACH_NEAR", 30)
+                m = max(abs(vl), abs(vr))
+                if m > cap:
+                    vl, vr = nav.floor_wheels(vl * cap / m, vr * cap / m)
             self._drive(vl, vr)
             if done:
                 self._go("ALIGN")
@@ -788,10 +795,11 @@ class Planner:
                     self._go("BACKOFF_SKIP")
                     return "CREEP pushing"
             # v4.1: ใกล้แล้วแต่หินเยื้องข้างเกินก้ามจะกิน -> คืบต่อไปก็แค่ดันหิน ถอยตั้งหลักแล้วหันใหม่ (ไม่เกิน 2 ครั้ง/ก้อน)
+            too_deep = C.ROBOT_BODY_FRONT_CM < fwd < C.GRIP_REACH_CM - getattr(C, "DEPTH_MAX_CM", 2.5)
             if (not lost and fwd < C.GRIP_REACH_CM + 6.0
-                    and abs(lat) > 2.8 and self.wiggle < 2):
+                    and (abs(lat) > 2.8 or too_deep) and self.wiggle < 2):
                 self.wiggle += 1
-                self.log(f"creep misaligned lat={lat:.1f} -> realign {self.wiggle}")
+                self.log(f"creep misaligned lat={lat:.1f} deep={too_deep} -> realign {self.wiggle}")
                 self._drive(0, 0)
                 self._go("CREEP_BACK")
                 return "CREEP realign"
