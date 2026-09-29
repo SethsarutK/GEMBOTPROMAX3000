@@ -625,7 +625,7 @@ class Planner:
                 self.scatter_t0 = time.time()
             self.log(f"SCATTER round {self.scatter_rounds}")
             self.log(f"SCATTER: pile at ({self.scatter_pile[0]:.0f},{self.scatter_pile[1]:.0f}) -> charge!")
-            if not self.jaw_open:
+            if not self.jaw_open and not self.link.busy:
                 self.link.dump(); self.jaw_open = True   # v5.3: อ้าก้ามช่วยปัดหินตอนพุ่ง/หมุน
             self._go("SCATTER_AIM")
             st = "SCATTER_AIM"
@@ -710,8 +710,11 @@ class Planner:
             if self.contested_at is None or nav.dist(*self.contested_at, *self.target["cm"]) > 4.0:
                 self.contested = 0
             self.contested_at = tuple(self.target["cm"])
-            if not self.jaw_open:
-                self.link.dump()          # v5.3: อ้าปากทิ้งไว้ตั้งแต่ตอนนี้ เดินเข้าไปชนหินแล้วค่อยหนีบ
+            # v5.7 [req4] Gripper FSM: CLOSED_EMPTY -(เลือกเป้า)-> OPEN ค้าง -(PICK ที่หิน)-> CLOSED_HOLD
+            #             -(DUMP ที่วง)-> OPEN ค้าง ; jaw_open + ack ของ link กันส่งซ้ำ,
+            #             ห้ามยิงคำสั่งใหม่ทับตอนคำสั่งเก่ายังรอ ack (link.busy)
+            if not self.jaw_open and not self.link.busy:
+                self.link.dump()          # อ้าปากทิ้งไว้ตั้งแต่ตอนนี้ เดินเข้าไปชนหินแล้วค่อยหนีบ
                 self.jaw_open = True
             if getattr(C, "SIMPLE_APPROACH", False):
                 # v5.2: ไม่หาจุด/ไม่มีจุดก่อนถึง — จุดตั้งต้น = หน้าหินฝั่งที่หุ่นยืนอยู่เท่านั้น
