@@ -813,7 +813,7 @@ def main():
         pose, pose_status = tracker.get_pose_or_last()
         # ตรวจหุ่นก่อน แล้วค่อยหา gem โดยตัดตัวหุ่นออก
         gems = detect_gems(frame, profiles, exclude_zones=zones, robot_pose=pose)
-        gems, n_ambig = resolve_ambiguous(gems)
+        gems, n_ambig = resolve_ambiguous(gems, profiles=profiles)
 
         loose = [g for g in gems if g["in_zone"] is None]
         placed_ok = [g for g in gems if g.get("correct") is True]
@@ -875,11 +875,19 @@ def profile_overlaps(profiles):
     return out
 
 
-def resolve_ambiguous(gems, min_dist_px=15):
+def resolve_ambiguous(gems, min_dist_px=15, profiles=None):
     """
-    หินที่ถูกจับเป็น 2 สีที่ตำแหน่งเดียวกัน (profile ทับกัน) -> ไม่แน่ใจ
-    ตัดทิ้งทั้งคู่ ไม่ให้ planner หยิบไปวางผิดวง  (คืน list ที่สะอาดแล้ว, จำนวนที่ตัด)
+    v5.0 (external review): จุดเดียวโดนจับเป็น 2 สี (มาสก์ทับกัน, ศูนย์ห่าง < 8 px)
+    -> ให้สีที่โปรไฟล์ "จำเพาะกว่า" (s_min+v_min สูงกว่า เช่น NEON_CYAN ชนะ DEEP_SKY_BLUE
+       ตรงพิกเซลสว่าง) ชนะ แทนการทิ้งทั้งคู่ ซึ่งทำให้หินฟ้าสว่างหายทั้งสี
+    ของเดิมยังตัด "หินต่างสีที่วางชิดกัน" (8-15 px) ทิ้งด้วย -> เลิกตัด เก็บทั้งคู่
+    ถ้าไม่ส่ง profiles มา (เรียกแบบเก่า) จุดทับกันจะถูกทิ้งทั้งคู่เหมือนเดิม
+    คืน (list ที่สะอาดแล้ว, จำนวนที่ตัด)
     """
+    SAME_BLOB_PX = 8
+    def spec(cls):
+        p = (profiles or {}).get(cls, {})
+        return p.get("s_min", 0) + p.get("v_min", 0)
     bad = set()
     for i in range(len(gems)):
         for j in range(i + 1, len(gems)):
@@ -887,8 +895,11 @@ def resolve_ambiguous(gems, min_dist_px=15):
                 continue
             dx = gems[i]["px"][0] - gems[j]["px"][0]
             dy = gems[i]["px"][1] - gems[j]["px"][1]
-            if dx * dx + dy * dy < min_dist_px * min_dist_px:
-                bad.add(i); bad.add(j)
+            if dx * dx + dy * dy < SAME_BLOB_PX * SAME_BLOB_PX:
+                if profiles:
+                    bad.add(i if spec(gems[i]["class"]) < spec(gems[j]["class"]) else j)
+                else:
+                    bad.add(i); bad.add(j)
     clean = [g for k, g in enumerate(gems) if k not in bad]
     return clean, len(bad)
 

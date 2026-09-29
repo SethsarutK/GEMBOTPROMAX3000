@@ -224,7 +224,7 @@ def run_real(args):
         gems_cm = None                       # None = เฟรมนี้ไม่ตรวจหิน planner ใช้ track เดิม
         if frame_i % GEM_EVERY == 1:
             gems_px = detect_gems(frame, profiles, exclude_zones=zones_px)
-            gems_px, n_ambig = resolve_ambiguous(gems_px)
+            gems_px, n_ambig = resolve_ambiguous(gems_px, profiles=profiles)
             gems_cm = [{"cm": calib.to_field(g["px"]), "class": g["class"], "area": g["area"], "px": g["px"]} for g in gems_px]
             gems_cm = nav.filter_outside_field(gems_cm)          # ตัดกำแพง/นอกสนาม
             pl.raw_gems = list(gems_cm)                          # v4.5: ก่อนตัดตัวหุ่น -> planner ใช้ดู "ในปากมีอะไร"

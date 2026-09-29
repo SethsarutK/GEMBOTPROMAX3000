@@ -258,7 +258,7 @@ class App:
         self.gem_t = time.time()
         try:
             g = detect_gems(self.frame, self.profiles, exclude_zones=None)
-            g, _ = resolve_ambiguous(g)
+            g, _ = resolve_ambiguous(g, profiles=self.profiles)
         except Exception:
             g = []
         self.gems = g
