@@ -688,7 +688,10 @@ class Planner:
                     vl, vr, _ = self._go_via(ax, ay, th, self.pre_pt, gems, exclude=self.target)
                     self._drive(vl, vr)
                     if self.in_state() > C.T_STATE_TIMEOUT:
-                        self.log("approach timeout -> re-choose")
+                        # v5.0: แบนก้อนนี้ด้วย ไม่งั้น CHOOSE เลือกก้อนเดิม -> วนอีก 25 วิ (external review)
+                        self.log("approach timeout -> blacklist + re-choose")
+                        if self.target is not None:
+                            self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
                         self._go("CHOOSE")
                     return f"GO_APPROACH(pre) d={nav.dist(ax, ay, *self.pre_pt):.0f}cm"
             vl, vr, done = self._go_via(ax, ay, th, self.approach, gems, exclude=self.target)
@@ -696,7 +699,9 @@ class Planner:
             if done:
                 self._go("ALIGN")
             elif self.in_state() > C.T_STATE_TIMEOUT:
-                self.log("approach timeout -> re-choose")
+                self.log("approach timeout -> blacklist + re-choose")
+                if self.target is not None:
+                    self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
                 self._go("CHOOSE")
             return f"GO_APPROACH d={nav.dist(ax, ay, *self.approach):.0f}cm"
 
