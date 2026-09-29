@@ -629,10 +629,20 @@ class Planner:
                 why = "passed" if passed else "wall" if wall else "stall" if stalled else "timeout"
                 self.log(f"SCATTER run end ({why}) fwd={fwd:.0f}")
                 self._drive(0, 0)
-                self._go("SCATTER_BACK")
+                # v4.9b: ถึงกองแล้วหมุนตัวเร็ว ๆ ปัดหินให้กระจายก่อนถอย (ทีมขอ 29 ก.ย.)
+                self._go("SCATTER_SPIN" if getattr(C, "T_SCATTER_SPIN", 0) > 0 else "SCATTER_BACK")
                 return f"SCATTER done ({why})"
             self._drive(vl, vr)
             return f"SCATTER charge fwd={fwd:.0f} lat={lat:.0f}"
+
+        if st == "SCATTER_SPIN":
+            v = getattr(C, "V_SCATTER", 75)
+            self._drive(C.TURN_SIGN * v, -C.TURN_SIGN * v)   # หมุนอยู่กับที่แรง ๆ ให้ก้าม/ตัวปัดหินออก
+            if self.in_state() > getattr(C, "T_SCATTER_SPIN", 1.5):
+                self._drive(0, 0)
+                self._go("SCATTER_BACK")
+                return "SCATTER spin done"
+            return "SCATTER spinning"
 
         if st == "SCATTER_BACK":
             v = getattr(C, "V_STALL_BACK", 45)
