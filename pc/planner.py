@@ -411,11 +411,8 @@ class Planner:
                 cost -= 40 * (len(C.COLOR_PRIORITY) - C.COLOR_PRIORITY.index(g["class"]))
             if g["area"] >= C.BIG_GEM_AREA_PX:
                 cost -= 10                    # ก้อนใหญ่จับง่ายกว่า
-            # v4.1: มีหินก้อนอื่นขวางในแถบก้ามระหว่างจุดตั้งต้นกับเป้า -> ก้ามจะคว้าก้อนนั้นแทน (ผิดสี)
-            #       ให้ cost แพงมาก (ยังเลือกได้ถ้าไม่มีทางเลือกอื่น)
-            ap_g, blocked = self._approach_point(ax, ay, g, pile, loose)
-            if blocked:
-                cost += 200
+            # v4.9: เลิกคิดเรื่องก้อนขวาง (ทีมขอ 29 ก.ย.) — เดินตรงเข้าไปหนีบเลย
+            ap_g, _ = self._approach_point(ax, ay, g, pile, loose)
             # v4.1j: ระยะที่ต้องเดินจริงคือ "ถึงจุดตั้งต้น" ไม่ใช่ถึงหิน (จุดตั้งต้นอาจอยู่คนละฝั่งกอง = เดินอ้อม 60+ cm)
             cost += nav.dist(ax, ay, *ap_g) - nav.dist(ax, ay, *g["cm"])
             cands.append((cost, g, ap_g))
@@ -449,14 +446,10 @@ class Planner:
             # v4.1j: จุดยืน/แนวหมุนต้องไม่ล้ำวงที่มีหินแล้ว (ก้ามอ้ากวาดหินในวงตอน ALIGN) -> ลองมุมอื่นแทนการดันจุดออก
             if any(nav.dist(*ap, zx, zy) < need for zx, zy in zones_keep):
                 continue
-            th_g = nav.heading_to(*ap, *g["cm"])
-            if not self._front_blockers(ap[0], ap[1], th_g, g, gems):
-                # v4.1j: ในบรรดามุมที่ "โล่ง" เลือกจุดที่หุ่นเดินไปถึงใกล้ที่สุด (มุมนอกกองได้แต้มต่อ 8 cm)
-                # v4.4: + หินที่ปลายก้ามอ้าจะกวาดผ่าน ก้อนละ 15 cm (ก้ามจริงกว้างกว่าช่องหนีบ)
-                score = nav.dist(ax, ay, *ap) + abs(off) / 30.0 * 8.0 \
-                    + 15.0 * self._sweep_count(ap[0], ap[1], th_g, g, gems)
-                if best is None or score < best[0]:
-                    best = (score, ap)
+            # v4.9: ไม่เช็คก้อนขวาง/ก้ามกวาดแล้ว — เลือกมุมที่เดินถึงเร็วสุด (ปกติ = แนวตรงจากหุ่น)
+            score = nav.dist(ax, ay, *ap) + abs(off) / 30.0 * 8.0
+            if best is None or score < best[0]:
+                best = (score, ap)
         if best is not None:
             return best[1], False
         return first, True
@@ -757,17 +750,8 @@ class Planner:
                 why = "reach" if done else ("in jaw" if in_jaw else ("track lost" if lost else "timeout"))
                 self._drive(0, 0)
                 self.creep_settle = None
-                # v4.1: มีหินก้อนอื่นอยู่ในแถบก้ามด้วย -> หนีบไปก็ได้ก้อนผิด (ผิดสี) ถอยออกแล้วเลือกใหม่
-                #       (ครั้งที่ 2 ของก้อนเดิม -> blacklist ไปเลย)
-                blockers = self._front_blockers(ax, ay, th, self.target, gems)
-                # v4.8: เอา 'หนีบก้อนที่ขวางแทน' ออก (ทีมขอ 29 ก.ย.) -> มีก้อนขวาง = ถอยเลือกใหม่อย่างเดียว
-                if blockers and not lost:
-                    self.contested += 1
-                    self.log(f"jaw contested by {len(blockers)} other gem(s) -> skip target ({self.contested})")
-                    if self.contested >= 2:
-                        self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
-                    self._go("BACKOFF_SKIP")
-                    return "CREEP contested"
+                # v4.9: เอาระบบจับหินขวางออกทั้งหมด (ทีมขอ 29 ก.ย. — ของจริงมันเห็นก้อนเป้าเป็นก้อนขวางเอง
+                #       แล้ววนเลือกใหม่ไม่หนีบสักที) -> ถึงระยะแล้วหนีบเลย
                 self.log(f"creep -> pick ({why})")
                 self.pick_pos = tuple(self.target["cm"])   # จำตำแหน่งหินก่อนหนีบ ไว้เช็คหลังถอย
                 self.pick_heading = th                     # v4.2: ทิศตอนหนีบ ไว้วัดว่าหมุนพ้น 40° แล้ว
