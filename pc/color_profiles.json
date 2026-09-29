@@ -1,50 +1,50 @@
 {
   "MARIGOLD_ACCENT": {
-    "h_min": 6,
-    "h_max": 54,
-    "s_min": 156,
-    "s_max": 254,
-    "v_min": 189,
+    "h_min": 9,
+    "h_max": 22,
+    "s_min": 189,
+    "s_max": 255,
+    "v_min": 200,
     "v_max": 255
   },
   "DEEP_CRIMSON": {
-    "h_min": 166,
-    "h_max": 178,
-    "s_min": 17,
+    "h_min": 172,
+    "h_max": 4,
+    "s_min": 185,
     "s_max": 255,
-    "v_min": 186,
+    "v_min": 175,
     "v_max": 255
   },
   "LIME_GREEN": {
-    "h_min": 20,
-    "h_max": 136,
-    "s_min": 120,
-    "s_max": 187,
-    "v_min": 174,
-    "v_max": 221
+    "h_min": 50,
+    "h_max": 66,
+    "s_min": 99,
+    "s_max": 255,
+    "v_min": 105,
+    "v_max": 255
   },
   "IRIDESCENT_VIOLET": {
-    "h_min": 142,
-    "h_max": 162,
-    "s_min": 54,
+    "h_min": 149,
+    "h_max": 161,
+    "s_min": 30,
     "s_max": 255,
-    "v_min": 28,
+    "v_min": 69,
     "v_max": 255
   },
   "DEEP_SKY_BLUE": {
-    "h_min": 87,
-    "h_max": 122,
-    "s_min": 242,
+    "h_min": 91,
+    "h_max": 103,
+    "s_min": 200,
     "s_max": 255,
-    "v_min": 120,
-    "v_max": 247
+    "v_min": 88,
+    "v_max": 255
   },
   "NEON_CYAN": {
-    "h_min": 80,
-    "h_max": 97,
-    "s_min": 109,
+    "h_min": 90,
+    "h_max": 102,
+    "s_min": 167,
     "s_max": 255,
-    "v_min": 194,
+    "v_min": 163,
     "v_max": 255
   }
 }
