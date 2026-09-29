@@ -126,3 +126,6 @@ try:
                     globals()[_k] = _v
 except Exception as _e:
     print("[CONFIG] grip_calib.json อ่านไม่ได้:", _e)
+
+# ---- v5.4 target-loss hysteresis (ทีมขอ 29 ก.ย.) ----
+T_BLIND = 1.0        # เป้าหายจากกล้องตอนยังไกล: เดินตามตำแหน่งล่าสุดต่ออีกเท่านี้ (วิ) ก่อนยอมเลือกก้อนใหม่

@@ -113,6 +113,7 @@ class Planner:
         self.state = s
         self.t_state = time.time()
         self.creep_settle = None
+        self.blind_t = None
         self._pose_hist = []                       # v4.5: เริ่มนับ stall ใหม่ทุกครั้งที่เปลี่ยน state
         if s == "PICK_BACKOFF":
             self.jaw_seen = {}
@@ -167,6 +168,7 @@ class Planner:
         self.bin_count = 0
         self.scatter_done = False
         self.jaw_open = False      # v5.3: จำว่าปากอ้าค้างอยู่ไหม (อ้าไว้ก่อนเข้าหาหินทุกครั้ง)
+        self.blind_t = None        # v5.4: เวลาเริ่มเดินตามเป้าที่หายจากกล้อง (blind tracking)
         self.scatter_pile = None
         self._go("CHOOSE")
 
@@ -751,20 +753,40 @@ class Planner:
             #        ไม่ใช่ "เข้าก้ามแล้ว" -> ห้ามหนีบอากาศ: ถ้า track ตายและหาก้อนแทนไม่ได้ ให้ถอยแล้วเลือกใหม่
             if self.target.get("miss", 0) >= 3 and not any(t is self.target for t in self.tracker.tracks):
                 # v5.1: หายตอนอยู่ใกล้ปาก = โดนแขน/ก้ามบัง -> ปล่อยให้เงื่อนไข lost ข้างล่างพาไปหนีบเลย
-                #       (ของจริง 29 ก.ย.: วงตัดแขนบังก้อนเป้า ระบบเลยถอยเลือกก้อนใหม่วนไม่จบ)
+                # v5.4: หายตอนไกล -> ยังไม่ถอยทันที เดินต่อไปตำแหน่งล่าสุดอีก T_BLIND ก่อน (เผื่อกล้อง/สีกะพริบ)
                 if not near:
-                    self.log("target track lost during creep (far) -> re-choose")
-                    self._drive(0, 0)
-                    self._go("BACKOFF_SKIP")
-                    return "CREEP target lost"
+                    if self.blind_t is None:
+                        self.blind_t = time.time()
+                        self.log("target lost (far) -> blind-follow last position")
+                    if time.time() - self.blind_t > getattr(C, "T_BLIND", 1.0):
+                        self.log("target still lost after blind window -> re-choose (no blacklist)")
+                        self._drive(0, 0)
+                        self._go("BACKOFF_SKIP")
+                        return "CREEP target lost"
+            else:
+                self.blind_t = None
             # v4.5: หินเป้าถูกดันเลื่อนไปจากจุดเริ่มคืบมาก = เรากำลังไถหินเข้ากอง (ของจริง: ดันจนมอเตอร์ค้าง)
+            force_pick = False
             if self.creep_t0_target is not None and \
                     nav.dist(*self.target["cm"], *self.creep_t0_target) > getattr(C, "PUSH_ABORT_CM", 6.0):
-                self.log("target is being pushed away -> abort creep, blacklist")
-                self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
-                self._drive(0, 0)
-                self._go("BACKOFF_SKIP")
-                return "CREEP pushing"
+                # v5.4 (ของจริง 29 ก.ย.: "ดันหินเสร็จแล้วเปลี่ยนก้อน"): ดันได้ = หินแตะก้ามอยู่แล้ว
+                if abs(lat) <= getattr(C, "JAW_OPEN_HALF_CM", 7.0) and \
+                        C.ROBOT_BODY_FRONT_CM < fwd <= C.GRIP_REACH_CM + 3.0:
+                    self.log("pushing the gem inside the jaws -> grab NOW")
+                    force_pick = True
+                elif self.wiggle < 2:
+                    self.wiggle += 1
+                    self.creep_t0_target = tuple(self.target["cm"])   # นับระยะดันใหม่หลังตั้งหลัก
+                    self.log(f"pushing but off-jaw (lat={lat:.1f}) -> realign {self.wiggle}")
+                    self._drive(0, 0)
+                    self._go("CREEP_BACK")
+                    return "CREEP push realign"
+                else:
+                    self.log("pushed away twice -> abort creep, blacklist")
+                    self.blacklist.append((tuple(self.target["cm"]), self.target["class"]))
+                    self._drive(0, 0)
+                    self._go("BACKOFF_SKIP")
+                    return "CREEP pushing"
             # v4.1: ใกล้แล้วแต่หินเยื้องข้างเกินก้ามจะกิน -> คืบต่อไปก็แค่ดันหิน ถอยตั้งหลักแล้วหันใหม่ (ไม่เกิน 2 ครั้ง/ก้อน)
             if (not lost and fwd < C.GRIP_REACH_CM + 6.0
                     and abs(lat) > 2.8 and self.wiggle < 2):
@@ -777,6 +799,9 @@ class Planner:
                 vl = vr = 0
             # v4.1g: "ถึงแล้ว" ต้องนิ่งดูซ้ำ 0.3 วิ (กล้องหน่วง ~0.15 วิ + สั่น) ถ้ายืนยันค่อยหนีบ ไม่งั้นคืบต่อ
             #        (sim: หนีบพลาดเพราะตำแหน่งจริงห่าง 3.1-3.3 ทั้งที่ประเมินว่าถึง)
+            if force_pick:
+                done = True
+                self.creep_settle = time.time() - 1.0     # หินแตะก้ามอยู่แล้ว ไม่ต้องรอนิ่ง
             if (done or in_jaw) and not lost:
                 if self.creep_settle is None:
                     self.creep_settle = time.time()
