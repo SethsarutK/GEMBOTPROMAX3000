@@ -657,10 +657,12 @@ def lock_camera(cap, exposure=None, wb=None):
               None = แค่ปิด auto แล้วคงค่าปัจจุบัน
     TODO ทดสอบกับกล้องสนามจริง: บางกล้องไม่รับค่าพวกนี้ ต้องตั้งในโปรแกรมของกล้องแทน
     """
-    # 0.25 = manual สำหรับ V4L2/DirectShow ส่วนใหญ่, บางตัวใช้ 1
-    for v in (0.25, 1):
+    # v5.0 bugfix: ของเดิม set 0.25 แล้วตามด้วย 1 เสมอ = จบที่ 1 (บน MSMF คือ "auto") -> ไม่เคยล็อกจริง
+    # manual: MSMF = 0, DirectShow/V4L2 = 0.25 -> ลองทีละค่า หยุดที่ตัวแรกที่ set แล้วอ่านกลับตรง
+    for v in (0, 0.25):
         try:
-            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, v)
+            if cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, v) and abs(cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) - v) < 0.01:
+                break
         except Exception:
             pass
     if exposure is not None:
