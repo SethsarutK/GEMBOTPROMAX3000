@@ -167,6 +167,8 @@ class Planner:
         self.delivered = 0
         self.bin_count = 0
         self.scatter_done = False
+        self.scatter_rounds = 0    # v5.6 [req1]: จำนวนรอบที่พุ่งชนกองไปแล้ว
+        self.scatter_t0 = None     # เวลาเริ่มพุ่งรอบแรก (คุมงบเวลารวม)
         self.jaw_open = False      # v5.3: จำว่าปากอ้าค้างอยู่ไหม (อ้าไว้ก่อนเข้าหาหินทุกครั้ง)
         self.blind_t = None        # v5.4: เวลาเริ่มเดินตามเป้าที่หายจากกล้อง (blind tracking)
         self.scatter_pile = None
@@ -174,14 +176,21 @@ class Planner:
 
     # ---------- v4.6: เปิดเกมพุ่งชนกองให้กระจาย ----------
     def _scatter_wanted(self, gems):
-        """True ถ้ายังไม่เคยพุ่ง และกองกลางแน่นพอ (>= SCATTER_MIN_GEMS ในรัศมี 20 cm รอบใจกลางกอง)"""
-        if self.scatter_done or not getattr(C, "SCATTER_ENABLED", False):
+        """v5.6 [req1] Dispersion Loop: พุ่งซ้ำได้เรื่อย ๆ จนกองโล่ง (density < SCATTER_MIN_GEMS)
+        หยุดเมื่อ: ครบ SCATTER_MAX_ROUNDS รอบ หรือใช้เวลารวมเกิน T_SCATTER_BUDGET"""
+        if not getattr(C, "SCATTER_ENABLED", False):
+            return False
+        if self.scatter_rounds >= getattr(C, "SCATTER_MAX_ROUNDS", 3):
+            return False
+        if self.scatter_t0 is not None and time.time() - self.scatter_t0 > getattr(C, "T_SCATTER_BUDGET", 25.0):
             return False
         loose = [g for g in gems if self._in_zone(g["cm"]) is None]
         pile = self._pile_center(loose)
         if pile is None:
             return False
-        n = sum(1 for g in loose if nav.dist(*g["cm"], *pile) <= 20.0)
+        # รอบแรกดูทั้งกอง (รัศมี 20) รอบถัดไปดูเฉพาะแกนกลาง (12) — กระจายแล้วก็เลิกพุ่ง
+        r = 20.0 if self.scatter_rounds == 0 else 12.0
+        n = sum(1 for g in loose if nav.dist(*g["cm"], *pile) <= r)
         if n < getattr(C, "SCATTER_MIN_GEMS", 12):
             return False
         self.scatter_pile = pile
@@ -611,7 +620,10 @@ class Planner:
         # =========================================================
         # ---- v4.6: รอบแรกพุ่งผ่ากลางกองด้วยความเร็วสูงให้หินกระจาย แล้วค่อยเริ่มเก็บ ----
         if st == "CHOOSE" and self.bin_count == 0 and self._scatter_wanted(gems):
-            self.scatter_done = True                       # ทำครั้งเดียวต่อเกม
+            self.scatter_rounds += 1
+            if self.scatter_t0 is None:
+                self.scatter_t0 = time.time()
+            self.log(f"SCATTER round {self.scatter_rounds}")
             self.log(f"SCATTER: pile at ({self.scatter_pile[0]:.0f},{self.scatter_pile[1]:.0f}) -> charge!")
             if not self.jaw_open:
                 self.link.dump(); self.jaw_open = True   # v5.3: อ้าก้ามช่วยปัดหินตอนพุ่ง/หมุน
@@ -667,9 +679,17 @@ class Planner:
             if self.in_state() > 1.2:
                 self._drive(0, 0)
                 self.tracker = GemTracker()                 # ล้าง track เก่า หินย้ายที่หมดแล้ว
-                self._go("CHOOSE")
-                return "SCATTER back done -> choose"
+                self._go("SCATTER_SCAN")
+                return "SCATTER back done -> scan"
             return "SCATTER backing"
+
+        if st == "SCATTER_SCAN":
+            # v5.6: นิ่ง ๆ ให้กล้องเห็นหินชุดใหม่ครบก่อน แล้ว CHOOSE จะตัดสินว่ากองยังแน่น (พุ่งอีกรอบ) หรือเริ่มเก็บ
+            self._drive(0, 0)
+            if self.in_state() > getattr(C, "T_SCATTER_SCAN", 0.6):
+                self._go("CHOOSE")
+                return "SCATTER scan done"
+            return "SCATTER scanning"
 
         if st == "CHOOSE":
             self._drive(0, 0)
