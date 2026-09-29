@@ -353,11 +353,13 @@ class Planner:
     def _obstacles(self, gems, exclude=None):
         """ตำแหน่งหินทุกก้อนที่ต้องหลบ (ยกเว้นก้อนเป้าหมาย) + วงที่มีหินแล้ว (v4.1h)"""
         out = []
-        for g in gems:
-            if exclude is not None and g["class"] == exclude["class"] \
-                    and nav.dist(*g["cm"], *exclude["cm"]) < 4.0:
-                continue
-            out.append(g["cm"])
+        # v5.9: โหมด SIMPLE ไม่หลบหินแล้ว (เดินตรงชนได้) แต่ "วงที่มีแต้ม" ยังต้องหลบเสมอ
+        if not getattr(C, "SIMPLE_APPROACH", False):
+            for g in gems:
+                if exclude is not None and g["class"] == exclude["class"] \
+                        and nav.dist(*g["cm"], *exclude["cm"]) < 4.0:
+                    continue
+                out.append(g["cm"])
         exempt = self._in_zone(exclude["cm"]) if exclude is not None else None
         for zx, zy in self._filled_zones(gems, exempt):
             out.append((zx, zy))
