@@ -739,10 +739,13 @@ class Planner:
             # v4.1i: ตั้งแต่ v4.1b หินในก้ามยัง "มองเห็น" ได้ (ไม่ถูกตัดแล้ว) -> track หายตอนคืบ = หินถูกดันไปไกล/สีกะพริบ
             #        ไม่ใช่ "เข้าก้ามแล้ว" -> ห้ามหนีบอากาศ: ถ้า track ตายและหาก้อนแทนไม่ได้ ให้ถอยแล้วเลือกใหม่
             if self.target.get("miss", 0) >= 3 and not any(t is self.target for t in self.tracker.tracks):
-                self.log("target track lost during creep -> re-choose")
-                self._drive(0, 0)
-                self._go("BACKOFF_SKIP")
-                return "CREEP target lost"
+                # v5.1: หายตอนอยู่ใกล้ปาก = โดนแขน/ก้ามบัง -> ปล่อยให้เงื่อนไข lost ข้างล่างพาไปหนีบเลย
+                #       (ของจริง 29 ก.ย.: วงตัดแขนบังก้อนเป้า ระบบเลยถอยเลือกก้อนใหม่วนไม่จบ)
+                if not near:
+                    self.log("target track lost during creep (far) -> re-choose")
+                    self._drive(0, 0)
+                    self._go("BACKOFF_SKIP")
+                    return "CREEP target lost"
             # v4.5: หินเป้าถูกดันเลื่อนไปจากจุดเริ่มคืบมาก = เรากำลังไถหินเข้ากอง (ของจริง: ดันจนมอเตอร์ค้าง)
             if self.creep_t0_target is not None and \
                     nav.dist(*self.target["cm"], *self.creep_t0_target) > getattr(C, "PUSH_ABORT_CM", 6.0):
@@ -751,7 +754,6 @@ class Planner:
                 self._drive(0, 0)
                 self._go("BACKOFF_SKIP")
                 return "CREEP pushing"
-            lost = False
             # v4.1: ใกล้แล้วแต่หินเยื้องข้างเกินก้ามจะกิน -> คืบต่อไปก็แค่ดันหิน ถอยตั้งหลักแล้วหันใหม่ (ไม่เกิน 2 ครั้ง/ก้อน)
             if (not lost and fwd < C.GRIP_REACH_CM + 6.0
                     and abs(lat) > 2.8 and self.wiggle < 2):

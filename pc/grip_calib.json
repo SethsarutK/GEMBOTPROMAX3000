@@ -7,7 +7,7 @@
   "ROBOT_BODY_R_CM": 10.5,
   "ROBOT_BODY_FRONT_CM": 7.5,
   "ROBOT_REAR_CM": 3.5,
-  "ARM_R_CM": 12.5,
+  "ARM_R_CM": 4.5,
   "ROBOT_FRONT_CM": 30.0,
   "TAG_HEIGHT_CM": 13.0
 }
