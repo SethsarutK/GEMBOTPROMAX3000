@@ -92,6 +92,11 @@ class RobotLink:
         """v3: DUMP = เปิดปากปล่อยหินที่โซนสี"""
         self._send_reliable("DUMP")
 
+    def grip(self, deg):
+        """v6.0: สั่งมุม servo ปากตรง ๆ (firmware S,<deg>,<seq>) ไม่ผ่านลำดับอ้า->หุบ
+        ใช้ 2 อย่าง: อ้าพอประมาณก่อนเข้าหาหิน (GRIP_PREOPEN_DEG) และหุบทันทีที่หิน (GRIP_CLOSE_DEG)"""
+        self._send_reliable(f"S,{int(deg)}")
+
     def tick(self):
         """เรียกทุกเฟรม: ส่ง PICK/DUMP ซ้ำถ้ายังไม่ได้ ack ภายใน 0.3 วิ (กัน UDP หาย)
         ESP32 จะไม่เริ่ม sequence ซ้ำถ้ากำลัง busy อยู่ จึงส่งซ้ำได้ปลอดภัย"""

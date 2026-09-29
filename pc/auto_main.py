@@ -43,6 +43,14 @@ class SimLink:
         self.busy = True; self._busy_until = time.time() + 2.0
         self.world.pending = "dump"
 
+    def grip(self, deg):
+        # v6.0: มุม <= 10 = หุบ (เหมือน pick แต่ไม่มีท่อนอ้า), มุมอื่น = แค่ตั้งปาก ไม่ทำอะไรกับหิน
+        if deg <= 10:
+            self.busy = True; self._busy_until = time.time() + 1.0
+            self.world.pending = "pick"
+        else:
+            self.busy = True; self._busy_until = time.time() + 0.3
+
     def tick(self):
         if self.busy and time.time() >= self._busy_until:
             self.busy = False

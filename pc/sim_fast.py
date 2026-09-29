@@ -240,6 +240,12 @@ class RealLink(auto_main.SimLink):
     def dump(self):
         self.busy = True; self._busy_until = CLOCK.t + 1.2
         self.world.pending = "dump"
+    def grip(self, deg):
+        if deg <= 10:
+            self.busy = True; self._busy_until = CLOCK.t + 1.0
+            self.world.pending = "pick"
+        else:
+            self.busy = True; self._busy_until = CLOCK.t + 0.3
 
 
 ZONES = {"IRIDESCENT_VIOLET": (185, 34), "NEON_CYAN": (132, 18), "DEEP_CRIMSON": (151, 109),

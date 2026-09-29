@@ -169,7 +169,8 @@ class Planner:
         self.scatter_done = False
         self.scatter_rounds = 0    # v5.6 [req1]: จำนวนรอบที่พุ่งชนกองไปแล้ว
         self.scatter_t0 = None     # เวลาเริ่มพุ่งรอบแรก (คุมงบเวลารวม)
-        self.jaw_open = False      # v5.3: จำว่าปากอ้าค้างอยู่ไหม (อ้าไว้ก่อนเข้าหาหินทุกครั้ง)
+        self.jaw_state = "closed"  # v6.0: closed / preopen (อ้าพอประมาณ S,45) / open (DUMP อ้าสุด)
+        self.jaw_extra = []        # v6.1: สีแถมที่ติดมาในปากนอกจากสีที่จะส่ง
         self.blind_t = None        # v5.4: เวลาเริ่มเดินตามเป้าที่หายจากกล้อง (blind tracking)
         self.work_queue = None     # v5.8 [req3]: คิวสีที่จะไล่ทำทีละสี (None = ยังไม่ได้วางแผน)
         self.work_color = None     # สีที่กำลังโฟกัสอยู่ (None+คิวหมด = โหมดเก็บตกทุกสี)
@@ -652,7 +653,8 @@ class Planner:
         # ---- รอ sequence ของหุ่น (PICK/DUMP) ----
         if st in ("PICK", "DUMP"):
             wait = C.T_PICK_WAIT if st == "PICK" else C.T_DUMP_WAIT
-            if (self.in_state() > 0.5 and not self.link.busy) or self.in_state() > wait:
+            min_wait = getattr(C, "T_CLOSE_S", 1.0) if st == "PICK" else 0.5   # v6.0: S,0 ไม่มี busy ต้องรอเฟืองหุบเอง
+            if (self.in_state() > min_wait and not self.link.busy) or self.in_state() > wait:
                 if self.in_state() > wait: self.log("sequence timeout")
                 self._go("PICK_BACKOFF" if st == "PICK" else "VERIFY_DUMP")
             return f"{st} waiting robot busy={self.link.busy}"
@@ -665,8 +667,8 @@ class Planner:
                 self.scatter_t0 = time.time()
             self.log(f"SCATTER round {self.scatter_rounds}")
             self.log(f"SCATTER: pile at ({self.scatter_pile[0]:.0f},{self.scatter_pile[1]:.0f}) -> charge!")
-            if not self.jaw_open and not self.link.busy:
-                self.link.dump(); self.jaw_open = True   # v5.3: อ้าก้ามช่วยปัดหินตอนพุ่ง/หมุน
+            if self.jaw_state != "preopen" and not self.link.busy:
+                self.link.grip(getattr(C, "GRIP_PREOPEN_DEG", 45)); self.jaw_state = "preopen"   # อ้าพอประมาณช่วยปัดหิน
             self._go("SCATTER_AIM")
             st = "SCATTER_AIM"
 
@@ -754,9 +756,10 @@ class Planner:
             # v5.7 [req4] Gripper FSM: CLOSED_EMPTY -(เลือกเป้า)-> OPEN ค้าง -(PICK ที่หิน)-> CLOSED_HOLD
             #             -(DUMP ที่วง)-> OPEN ค้าง ; jaw_open + ack ของ link กันส่งซ้ำ,
             #             ห้ามยิงคำสั่งใหม่ทับตอนคำสั่งเก่ายังรอ ack (link.busy)
-            if not self.jaw_open and not self.link.busy:
-                self.link.dump()          # อ้าปากทิ้งไว้ตั้งแต่ตอนนี้ เดินเข้าไปชนหินแล้วค่อยหนีบ
-                self.jaw_open = True
+            if self.jaw_state != "preopen" and not self.link.busy:
+                # v6.0: อ้า "พอประมาณ" (S,GRIP_PREOPEN_DEG) ไม่ใช่อ้าสุด แล้วค้างไว้จนถึงหิน
+                self.link.grip(getattr(C, "GRIP_PREOPEN_DEG", 45))
+                self.jaw_state = "preopen"
             if getattr(C, "SIMPLE_APPROACH", False):
                 # v5.2: ไม่หาจุด/ไม่มีจุดก่อนถึง — จุดตั้งต้น = หน้าหินฝั่งที่หุ่นยืนอยู่เท่านั้น
                 self.approach = self._approach_for(ax, ay, self.target)
@@ -897,8 +900,8 @@ class Planner:
                 self.turn_dir = 0                          # v4.2: ให้ PICK_BACKOFF เลือกข้างหมุนใหม่
                 # v4.1: จำว่ารอบ ๆ จุดหนีบมีหินสีนี้กี่ก้อน (ก้ามอาจคว้า "ก้อนข้าง ๆ สีเดียวกัน" แทนก้อนเป้า)
                 self.pick_nearby = self._count_same_near(self.pick_pos, self.target["class"], 8.0)
-                self.link.pick()
-                self.jaw_open = False     # v5.3: หนีบแล้วปากปิดค้าง
+                self.link.grip(getattr(C, "GRIP_CLOSE_DEG", 0))   # v6.0: หุบทันที ไม่ผ่านท่อนอ้าของ PICK (ประหยัด 0.9 วิ)
+                self.jaw_state = "closed"
                 self._go("PICK")
             gp = nav.gripper_point(ax, ay, th)
             return f"CREEP gap={nav.dist(*gp, *self.target['cm']):.1f}cm"
@@ -1090,7 +1093,7 @@ class Planner:
             if done or self.in_state() > C.T_CREEP_TIMEOUT * 2:      # v4.1: ทางเข้าวงยาวกว่าทางเข้าหิน (~15-20 cm)
                 self._drive(0, 0)
                 self.link.dump()
-                self.jaw_open = True      # v5.3: DUMP ค้างเปิด -> ก้อนถัดไปไม่ต้องสั่งอ้าซ้ำ
+                self.jaw_state = "open"   # DUMP อ้าสุดค้างไว้ (ก้อนถัดไปจะหุบลงมาที่ preopen เอง)
                 self._go("DUMP")
             gp = nav.gripper_point(ax, ay, th)
             return f"REVERSE_IN gap={nav.dist(*gp, *self.dump_pt):.1f}cm"
