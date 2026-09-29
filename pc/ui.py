@@ -124,6 +124,13 @@ def _tile(txt, size, bold, color):
     return t
 
 
+COLOR_TH = {"IRIDESCENT_VIOLET": "ม่วง", "NEON_CYAN": "ฟ้าอ่อน", "DEEP_CRIMSON": "แดง",
+            "MARIGOLD_ACCENT": "ส้ม", "DEEP_SKY_BLUE": "น้ำเงิน", "LIME_GREEN": "เขียว"}
+
+def th(c):
+    return COLOR_TH.get(c, str(c))
+
+
 def _blit_text(img, items, size_default=17):
     """วาดข้อความหลายชิ้น  items = [(x, y, text, bgr, size, bold)]"""
     if not items:

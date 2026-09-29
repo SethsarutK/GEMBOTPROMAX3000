@@ -187,6 +187,50 @@ def draw_capsules(out, calib, pose, holding=False):
         cv2.circle(out, p0, rpx, (90, 90, 90), 1); cv2.circle(out, p1, rpx, (90, 90, 90), 1)
         cv2.line(out, p0, p1, (90, 90, 90), 1)
 
+def draw_plan(out, calib, pl, pose, zones_px):
+    """v6.2 HUD ชัด ๆ: ก้อนที่จะหยิบ (วงเหลืองกระพริบ+ป้าย+เส้นจากหุ่น) / จุดที่จะวาง (วงใหญ่กระพริบ+ลูกศร) / ของในปาก"""
+    if pl.state in ("IDLE", "DONE"):
+        return
+    import time as _t
+    pulse = int(4 * math.sin(_t.time() * 6.0))
+    rob = calib.to_pixel(nav.axle_pose(pose)[:2]) if (pose and "cm" in pose) else None
+    YEL, WHT, BLK = (0, 230, 255), (255, 255, 255), (0, 0, 0)
+    holding = pl.holding()
+    # ---- เป้าที่จะหยิบ ----
+    if pl.target is not None and not holding and pl.state not in ("SCATTER_AIM", "SCATTER_RUN", "SCATTER_SPIN", "SCATTER_BACK", "SCATTER_SCAN"):
+        tp = calib.to_pixel(pl.target["cm"])
+        col = DRAW_BGR.get(pl.target["class"], YEL)
+        if rob:
+            cv2.line(out, rob, tp, YEL, 2, cv2.LINE_AA)
+        cv2.circle(out, tp, 22 + pulse, BLK, 5, cv2.LINE_AA)
+        cv2.circle(out, tp, 22 + pulse, YEL, 3, cv2.LINE_AA)
+        cv2.circle(out, tp, 9, col, -1, cv2.LINE_AA)
+        ui._blit_text(out, [(tp[0] + 26, tp[1] - 30, f"หยิบ {ui.th(pl.target['class'])}", YEL, 20, True)])
+        if pl.approach and pl.state == "GO_APPROACH":
+            ap = calib.to_pixel(pl.approach)
+            cv2.drawMarker(out, ap, (255, 0, 255), cv2.MARKER_TILTED_CROSS, 16, 2)
+    # ---- ปลายทางที่จะวาง ----
+    if holding and pl.color in zones_px:
+        z = zones_px[pl.color]; zc = tuple(map(int, z["px"])); zr = int(z["radius_px"])
+        col = DRAW_BGR.get(pl.color, WHT)
+        cv2.circle(out, zc, zr + 8 + pulse, BLK, 6, cv2.LINE_AA)
+        cv2.circle(out, zc, zr + 8 + pulse, col, 4, cv2.LINE_AA)
+        dp = calib.to_pixel(pl.dump_pt) if getattr(pl, "dump_pt", None) else zc
+        cv2.drawMarker(out, dp, WHT, cv2.MARKER_CROSS, 22, 3)
+        cv2.drawMarker(out, dp, col, cv2.MARKER_CROSS, 22, 1)
+        if rob:
+            cv2.arrowedLine(out, rob, dp, BLK, 5, tipLength=0.08, line_type=cv2.LINE_AA)
+            cv2.arrowedLine(out, rob, dp, col, 3, tipLength=0.08, line_type=cv2.LINE_AA)
+        ui._blit_text(out, [(zc[0] - zr, zc[1] - zr - 30, f"วาง {ui.th(pl.color)}", col, 20, True)])
+    # ---- ของในปาก ----
+    if holding and pose and "cm" in pose:
+        gp = calib.to_pixel(nav.gripper_point(*nav.axle_pose(pose)))
+        cv2.circle(out, gp, 14, BLK, 4, cv2.LINE_AA)
+        cv2.circle(out, gp, 14, DRAW_BGR.get(pl.color, WHT), 2, cv2.LINE_AA)
+        extra = "".join(f" +{ui.th(c)}" for c in getattr(pl, "jaw_extra", []))
+        ui._blit_text(out, [(gp[0] + 18, gp[1] + 4, f"ถือ {ui.th(pl.color)}{extra}", WHT, 17, True)])
+
+
 def run_real(args):
     from link import RobotLink
     profiles = load_profiles()
@@ -246,10 +290,7 @@ def run_real(args):
 
         out = draw_overlay(frame, zones_px, gems_px, pose, calib, None)
         draw_capsules(out, calib, pose, holding=pl.holding())
-        # วาดเป้าหมาย/จุด approach
-        if pl.target is not None and pl.state not in ("IDLE", "DONE"):
-            tp = calib.to_pixel(pl.target["cm"]); cv2.circle(out, tp, 12, (0, 0, 255), 2)
-            if pl.approach: cv2.circle(out, calib.to_pixel(pl.approach), 6, (255, 0, 255), 2)
+        draw_plan(out, calib, pl, pose, zones_px)      # v6.2: เป้าที่จะหยิบ / จุดที่จะวาง / ของในปาก
         # ---------- HUD (v3.9) : แสดงผลอย่างเดียว ไม่เปลี่ยนค่า/การทำงานใดๆ ----------
         running = pl.state not in ("IDLE", "DONE")
         pos_txt = (f"({pose['cm'][0]:.0f}, {pose['cm'][1]:.0f}) cm  หัน {pose['angle_cm_deg']:.0f}°"
@@ -260,7 +301,11 @@ def run_real(args):
              "ok" if running else "warn"),
             ("เวลา", f"{ui.mmss(pl.elapsed())}   (เหลือ {ui.mmss(pl.time_left())})"),
             ("ส่งเข้าวงแล้ว", f"{pl.delivered} ก้อน", "ok" if pl.delivered else "dim"),
-            ("ถืออยู่ในปาก", f"{pl.bin_count} ก้อน" + (f"  ·  {pl.color}" if pl.color else "")),
+            ("ถืออยู่ในปาก", (f"{ui.th(pl.color)}" + "".join(f" +{ui.th(c)}" for c in getattr(pl, "jaw_extra", []))
+                              + f"  →  วง{ui.th(pl.color)}") if pl.holding() and pl.color else "ว่าง",
+             "ok" if pl.holding() else "dim"),
+            ("จะหยิบ", f"{ui.th(pl.target['class'])} ที่ ({pl.target['cm'][0]:.0f}, {pl.target['cm'][1]:.0f})"
+             if (pl.target is not None and not pl.holding() and running) else "-", "key"),
             None,
             ("WiFi ถึงหุ่น", "ต่ออยู่" if link.alive else "ขาด!", "ok" if link.alive else "bad"),
             ("กล้องเห็นหุ่น", "เห็น" if pstat == "OK" else "ไม่เห็น!", "ok" if pstat == "OK" else "bad"),
