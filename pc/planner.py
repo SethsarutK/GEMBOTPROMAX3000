@@ -760,15 +760,7 @@ class Planner:
                 # v4.1: มีหินก้อนอื่นอยู่ในแถบก้ามด้วย -> หนีบไปก็ได้ก้อนผิด (ผิดสี) ถอยออกแล้วเลือกใหม่
                 #       (ครั้งที่ 2 ของก้อนเดิม -> blacklist ไปเลย)
                 blockers = self._front_blockers(ax, ay, th, self.target, gems)
-                if blockers and not lost:
-                    # v4.1: ถ้าก้อนที่ขวางอยู่ในโซนก้ามพอดี และเป็นสีที่มีวง -> หนีบก้อนนั้นแทนเลย (ทุกสีส่งได้ ไม่เสียเที่ยว)
-                    b = min(blockers, key=lambda g: self._rel_to_robot(ax, ay, th, g["cm"])[0])
-                    if (b["class"] in self.zones and b["class"] not in C.SKIP_COLORS
-                            and self._in_jaw_zone(ax, ay, th, b["cm"]) and self.bin_count == 0
-                            and not [g for g in self._front_blockers(ax, ay, th, b, gems) if g is not self.target]):
-                        self.log(f"jaw has {b['class']} in front of target -> grab it instead")
-                        self.target, self.color = b, b["class"]
-                        blockers = []
+                # v4.8: เอา 'หนีบก้อนที่ขวางแทน' ออก (ทีมขอ 29 ก.ย.) -> มีก้อนขวาง = ถอยเลือกใหม่อย่างเดียว
                 if blockers and not lost:
                     self.contested += 1
                     self.log(f"jaw contested by {len(blockers)} other gem(s) -> skip target ({self.contested})")
