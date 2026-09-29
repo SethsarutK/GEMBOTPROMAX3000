@@ -784,7 +784,9 @@ class Planner:
                     nav.dist(ax, ay, *self.target["cm"]) < getattr(C, "APPROACH_SLOW_CM", 35.0):
                 cap = getattr(C, "V_APPROACH_NEAR", 30)
                 m = max(abs(vl), abs(vr))
-                if m > cap:
+                # v5.10 bugfix (external review): บีบเฉพาะตอน "วิ่งหน้า" (ล้อสองข้างไปทางเดียวกัน)
+                # คำสั่งหมุนอยู่กับที่ (+55/-55) ห้ามบีบ ไม่งั้นหมุนไม่ออก -> STALL หลอก -> แบนหินดี ๆ
+                if m > cap and vl * vr > 0:
                     vl, vr = nav.floor_wheels(vl * cap / m, vr * cap / m)
             self._drive(vl, vr)
             if done:
