@@ -117,6 +117,7 @@ class Planner:
         self._pose_hist = []                       # v4.5: เริ่มนับ stall ใหม่ทุกครั้งที่เปลี่ยน state
         if s == "PICK_BACKOFF":
             self.jaw_seen = {}
+            self.jaw_near = {}
         if s in ("GO_ZONE", "GO_ZONE_AP"):
             self.jaw_lost_t = None
         if s == "CREEP" and self.target is not None:
@@ -133,6 +134,12 @@ class Planner:
             if d < bd:
                 best, bd = g["class"], d
         return best
+
+    def _jaw_classes(self, ax, ay, th, r=None):
+        """v6.1: สีของ blob ทุกก้อนที่อยู่ในปาก (raw_gems) — ปากอาจมีหิน 2 ก้อนเรียงข้างกัน"""
+        gp = nav.gripper_point(ax, ay, th)
+        r = r or (getattr(C, "JAW_CHECK_R_CM", 4.5) + 2.0)
+        return [g["class"] for g in (self.raw_gems or []) if nav.dist(*g["cm"], *gp) < r]
 
     def _stalled(self, ax, ay, th):
         """สั่งล้อ (ไม่ใช่ 0) แล้วตำแหน่ง/ทิศไม่เปลี่ยนนานเกิน STALL_S -> True"""
@@ -171,6 +178,7 @@ class Planner:
         self.scatter_t0 = None     # เวลาเริ่มพุ่งรอบแรก (คุมงบเวลารวม)
         self.jaw_state = "closed"  # v6.0: closed / preopen (อ้าพอประมาณ S,45) / open (DUMP อ้าสุด)
         self.jaw_extra = []        # v6.1: สีแถมที่ติดมาในปากนอกจากสีที่จะส่ง
+        self.jaw_near = {}         # v6.1: นับสีของก้อนที่อยู่ตรงที่นั่งปากพอดี
         self.blind_t = None        # v5.4: เวลาเริ่มเดินตามเป้าที่หายจากกล้อง (blind tracking)
         self.work_queue = None     # v5.8 [req3]: คิวสีที่จะไล่ทำทีละสี (None = ยังไม่ได้วางแผน)
         self.work_color = None     # สีที่กำลังโฟกัสอยู่ (None+คิวหมด = โหมดเก็บตกทุกสี)
@@ -876,6 +884,10 @@ class Planner:
                 vl = vr = 0
             # v4.1g: "ถึงแล้ว" ต้องนิ่งดูซ้ำ 0.3 วิ (กล้องหน่วง ~0.15 วิ + สั่น) ถ้ายืนยันค่อยหนีบ ไม่งั้นคืบต่อ
             #        (sim: หนีบพลาดเพราะตำแหน่งจริงห่าง 3.1-3.3 ทั้งที่ประเมินว่าถึง)
+            if not force_pick and getattr(C, "JAW_SEAT_GRAB", True) and self._jaw_class(ax, ay, th) is not None and not in_jaw:
+                # v6.1 (ทีมขอ): มีหิน "ก้อนไหนก็ตาม" เผลอเข้าที่นั่งปาก -> ก้อนในปากคือความจริง หุบเลย
+                self.log(f"a {self._jaw_class(ax, ay, th)} gem is already in the jaw seat -> grab it")
+                force_pick = True
             if force_pick:
                 done = True
                 self.creep_settle = time.time() - 1.0     # หินแตะก้ามอยู่แล้ว ไม่ต้องรอนิ่ง
@@ -972,12 +984,31 @@ class Planner:
         if st == "VERIFY_PICK":
             self._drive(0, 0)
             # v4.5: "แท็กหินในปาก" — ระหว่างรอ นับสีของ blob ที่อยู่ตรงจุดปากทุกเฟรม
-            jc = self._jaw_class(ax, ay, th)
-            self.jaw_seen[jc] = self.jaw_seen.get(jc, 0) + 1
+            jcs = self._jaw_classes(ax, ay, th)           # v6.1: ทุกก้อนในปาก (อาจ 2 ก้อน)
+            for jc in (jcs or [None]):
+                self.jaw_seen[jc] = self.jaw_seen.get(jc, 0) + 1
+            jn = self._jaw_class(ax, ay, th)              # ก้อนที่อยู่ตรงที่นั่งปากพอดี (ใกล้จุดปากสุด)
+            if jn is not None:
+                self.jaw_near[jn] = self.jaw_near.get(jn, 0) + 1
             if self.in_state() < C.T_VERIFY:
                 return "VERIFY_PICK ..."
-            seen = {k: v for k, v in self.jaw_seen.items() if k is not None}
-            jaw = max(seen, key=seen.get) if seen and max(seen.values()) >= 2 else None
+            seen = {k: v for k, v in self.jaw_seen.items() if k is not None and v >= 2}
+            self.jaw_extra = []
+            jaw = None
+            if seen:
+                # ปลายทาง: สีที่โฟกัส > สีที่ตั้งใจหยิบ > สีที่เห็นบ่อยสุด ; ที่เหลือ = สีแถม ติดไปด้วยแล้วค่อยคีบออก
+                near = {k: v for k, v in self.jaw_near.items() if k in seen}
+                if self.work_color in seen:
+                    jaw = self.work_color
+                elif near:
+                    jaw = max(near, key=near.get)      # ก้อนที่นั่งอยู่ในปากจริง ๆ (ไม่ใช่ก้อนข้าง ๆ บนพื้น)
+                elif self.target["class"] in seen:
+                    jaw = self.target["class"]
+                else:
+                    jaw = max(seen, key=seen.get)
+                self.jaw_extra = [k for k in seen if k != jaw and k in self.zones]
+                if self.jaw_extra:
+                    self.log(f"jaw holds {list(seen)} -> deliver {jaw}, extra {self.jaw_extra} rides along")
             if self.raw_gems is None:
                 jaw = "?"                      # ไม่มีข้อมูลปาก (ผู้เรียกเก่า) -> ใช้ตรรกะเดิมด้านล่าง
             elif jaw is None:
@@ -1125,6 +1156,20 @@ class Planner:
             self.zone_filled.add(self.color)         # v4.1h: วงนี้มีหินแล้ว
             self.bin_count = 0
             self.color = None
+            # v6.1 (ทีมขอ): สีแถมที่ติดมาถูกปล่อยลงวงนี้ด้วย -> มันอยู่ตรงหน้าปากพอดี คีบออกเลยแล้วไปส่งวงของมัน
+            if self.jaw_extra:
+                gp = nav.gripper_point(ax, ay, th)
+                cand = [t for t in self.tracker.stable() if t["class"] in self.jaw_extra
+                        and nav.dist(*t["cm"], *gp) < 16.0]
+                self.jaw_extra = []
+                if cand:
+                    t = min(cand, key=lambda g: nav.dist(*g["cm"], *gp))
+                    self.log(f"extra {t['class']} dropped in this zone -> pick it back out")
+                    self.target = t; self.color = t["class"]
+                    self.retry = 0; self.wiggle = 0
+                    self.approach = self._approach_for(ax, ay, t)
+                    self._go("ALIGN")
+                    return "re-pick extra colour"
             self._go("CHOOSE")
             return "counted"
 
