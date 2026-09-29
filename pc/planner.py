@@ -449,6 +449,7 @@ class Planner:
         max_nb = C.MAX_NEIGHBORS
         if pool and min(nb.values()) > max_nb:
             max_nb = min(nb.values())
+        risky_zones = self._filled_zones(gems)   # v5.11
         cands = []
         for g in pool:                        # v5.8b: pool กรองสี (self.color/work_color) ให้แล้ว
             if nb[id(g)] > max_nb:
@@ -469,6 +470,10 @@ class Planner:
                 cost -= 40 * (len(C.COLOR_PRIORITY) - C.COLOR_PRIORITY.index(g["class"]))
             if g["area"] >= C.BIG_GEM_AREA_PX:
                 cost -= 10                    # ก้อนใหญ่จับง่ายกว่า
+            if self._in_zone(g["cm"]) is not None:
+                cost -= 10                    # v5.11: ก้อนในวงผิดสี ย้ายไปวงถูก = +5 และลบ -1 ออก (คุ้มกว่าก้อนลอย)
+            elif any(nav.dist(*g["cm"], zx, zy) < self.zr + 12.0 for zx, zy in risky_zones):
+                cost += 30                    # v5.11: ก้อนลอยที่นอนชิดวงที่มีแต้ม เข้าไปหยิบเสี่ยงเบียดหินถูกหลุด (-5) -> เอาไว้ทีหลัง
             # v4.9: เลิกคิดเรื่องก้อนขวาง (ทีมขอ 29 ก.ย.) — เดินตรงเข้าไปหนีบเลย
             ap_g, _ = self._approach_point(ax, ay, g, pile, loose)
             # v4.1j: ระยะที่ต้องเดินจริงคือ "ถึงจุดตั้งต้น" ไม่ใช่ถึงหิน (จุดตั้งต้นอาจอยู่คนละฝั่งกอง = เดินอ้อม 60+ cm)
