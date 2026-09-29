@@ -171,6 +171,9 @@ class Planner:
         self.scatter_t0 = None     # เวลาเริ่มพุ่งรอบแรก (คุมงบเวลารวม)
         self.jaw_open = False      # v5.3: จำว่าปากอ้าค้างอยู่ไหม (อ้าไว้ก่อนเข้าหาหินทุกครั้ง)
         self.blind_t = None        # v5.4: เวลาเริ่มเดินตามเป้าที่หายจากกล้อง (blind tracking)
+        self.work_queue = None     # v5.8 [req3]: คิวสีที่จะไล่ทำทีละสี (None = ยังไม่ได้วางแผน)
+        self.work_color = None     # สีที่กำลังโฟกัสอยู่ (None+คิวหมด = โหมดเก็บตกทุกสี)
+        self.delivered_by = {}     # ส่งสำเร็จแล้วกี่ก้อนต่อสี
         self.scatter_pile = None
         self._go("CHOOSE")
 
@@ -394,6 +397,37 @@ class Planner:
     def _path_reset(self):
         self.path, self.path_t = [], 0.0
 
+    # ---------- v5.8 [req3] ทำทีละสีให้จบ ~80% แล้วค่อยสีถัดไป ----------
+    def _work_remaining(self, color, gems):
+        return sum(1 for g in gems if g["class"] == color
+                   and self._in_zone(g["cm"]) != color and not self._blacklisted(g))
+
+    def _update_work_color(self, gems):
+        if not getattr(C, "COLOR_FOCUS", True):
+            return
+        if len(gems) < 6:
+            return          # v5.8b: กล้อง/tracker ยังนับหินไม่ครบ (เช่น เพิ่งล้าง track หลัง scatter) อย่าเพิ่งวางแผน/หมุนคิว
+        if self.work_queue is None:                       # วางแผนครั้งแรก (หลัง scatter จบ)
+            cnt = {c: 0 for c in self.zones}
+            for g in gems:
+                if g["class"] in cnt and self._in_zone(g["cm"]) != g["class"]:
+                    cnt[g["class"]] += 1
+            order = [c for c in C.COLOR_PRIORITY if c in cnt] +                     sorted([c for c in cnt if c not in C.COLOR_PRIORITY], key=lambda c: -cnt[c])
+            self.work_queue = [c for c in order if c not in C.SKIP_COLORS]
+            self.work_color = self.work_queue.pop(0) if self.work_queue else None
+            self.log(f"colour plan: {self.work_color} first, queue={self.work_queue}")
+        c = self.work_color
+        if c is None:
+            return
+        rem = self._work_remaining(c, gems)
+        done = self.delivered_by.get(c, 0)
+        ratio = done / (done + rem) if (done + rem) > 0 else 1.0
+        if rem == 0 or ratio >= getattr(C, "COLOR_DONE_RATIO", 0.8):
+            if rem > 0:
+                self.work_queue.append(c)                 # เหลือเศษ เก็บตกท้ายคิว
+            self.work_color = self.work_queue.pop(0) if self.work_queue else None
+            self.log(f"colour {c} done {done}/{done+rem} -> next: {self.work_color}")
+
     # ---------- เลือกหิน ----------
     def _choose(self, ax, ay, gems):
         loose = [g for g in gems if (self._in_zone(g["cm"]) is None or self._pickable_wrong_zone(g, gems))
@@ -407,15 +441,14 @@ class Planner:
         pile = self._pile_center(loose)
         # v4.1: กองแน่นจนทุกก้อนมีเพื่อนบ้านเกิน MAX_NEIGHBORS -> เดิมคืน None แล้วหุ่นยืนนิ่งจนหมดเวลา
         #       ตอนนี้ผ่อนเกณฑ์เป็น "ก้อนที่เพื่อนบ้านน้อยที่สุด" (ขอบกอง) แทน
-        pool = [g for g in loose if not self.color or g["class"] == self.color]
+        want = self.color or self.work_color          # v5.8: ถือของ = สีนั้น, ไม่ถือ = สีที่โฟกัส
+        pool = [g for g in loose if not want or g["class"] == want]
         nb = {id(g): self._neighbors(g, loose) for g in pool}
         max_nb = C.MAX_NEIGHBORS
         if pool and min(nb.values()) > max_nb:
             max_nb = min(nb.values())
         cands = []
-        for g in loose:
-            if self.color and g["class"] != self.color:
-                continue                      # กระบะมีของสี self.color อยู่ ต้องสีเดิม
+        for g in pool:                        # v5.8b: pool กรองสี (self.color/work_color) ให้แล้ว
             if nb[id(g)] > max_nb:
                 continue
             zx, zy = self.zones[g["class"]]
@@ -693,6 +726,7 @@ class Planner:
 
         if st == "CHOOSE":
             self._drive(0, 0)
+            self._update_work_color(gems)          # v5.8 [req3]
             res = self._choose(ax, ay, gems)
             if res is None:
                 if self.bin_count > 0:
@@ -1073,6 +1107,8 @@ class Planner:
             after = self._count_in_zone(gems, self.color)
             got = max(0, after - self.zone_before)
             self.delivered += got
+            if got > 0:
+                self.delivered_by[self.color] = self.delivered_by.get(self.color, 0) + got
             self.log(f"placed {self.color}: zone {self.zone_before}->{after}  total={self.delivered}")
             self.zone_filled.add(self.color)         # v4.1h: วงนี้มีหินแล้ว
             self.bin_count = 0
