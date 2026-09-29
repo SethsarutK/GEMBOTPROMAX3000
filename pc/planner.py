@@ -685,7 +685,12 @@ class Planner:
             if self.contested_at is None or nav.dist(*self.contested_at, *self.target["cm"]) > 4.0:
                 self.contested = 0
             self.contested_at = tuple(self.target["cm"])
-            self.pre_pt = self._pre_point(self.approach, self.target["cm"])   # v4.1j
+            if getattr(C, "SIMPLE_APPROACH", False):
+                # v5.2: ไม่หาจุด/ไม่มีจุดก่อนถึง — จุดตั้งต้น = หน้าหินฝั่งที่หุ่นยืนอยู่เท่านั้น
+                self.approach = self._approach_for(ax, ay, self.target)
+                self.pre_pt = None
+            else:
+                self.pre_pt = self._pre_point(self.approach, self.target["cm"])   # v4.1j
             self._path_reset()
             self._go("GO_APPROACH")
             return f"target {self.color} at {tuple(round(v) for v in self.target['cm'])}"
