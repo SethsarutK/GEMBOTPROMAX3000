@@ -166,6 +166,7 @@ class Planner:
         self.delivered = 0
         self.bin_count = 0
         self.scatter_done = False
+        self.jaw_open = False      # v5.3: จำว่าปากอ้าค้างอยู่ไหม (อ้าไว้ก่อนเข้าหาหินทุกครั้ง)
         self.scatter_pile = None
         self._go("CHOOSE")
 
@@ -610,6 +611,8 @@ class Planner:
         if st == "CHOOSE" and self.bin_count == 0 and self._scatter_wanted(gems):
             self.scatter_done = True                       # ทำครั้งเดียวต่อเกม
             self.log(f"SCATTER: pile at ({self.scatter_pile[0]:.0f},{self.scatter_pile[1]:.0f}) -> charge!")
+            if not self.jaw_open:
+                self.link.dump(); self.jaw_open = True   # v5.3: อ้าก้ามช่วยปัดหินตอนพุ่ง/หมุน
             self._go("SCATTER_AIM")
             st = "SCATTER_AIM"
 
@@ -685,6 +688,9 @@ class Planner:
             if self.contested_at is None or nav.dist(*self.contested_at, *self.target["cm"]) > 4.0:
                 self.contested = 0
             self.contested_at = tuple(self.target["cm"])
+            if not self.jaw_open:
+                self.link.dump()          # v5.3: อ้าปากทิ้งไว้ตั้งแต่ตอนนี้ เดินเข้าไปชนหินแล้วค่อยหนีบ
+                self.jaw_open = True
             if getattr(C, "SIMPLE_APPROACH", False):
                 # v5.2: ไม่หาจุด/ไม่มีจุดก่อนถึง — จุดตั้งต้น = หน้าหินฝั่งที่หุ่นยืนอยู่เท่านั้น
                 self.approach = self._approach_for(ax, ay, self.target)
@@ -793,6 +799,7 @@ class Planner:
                 # v4.1: จำว่ารอบ ๆ จุดหนีบมีหินสีนี้กี่ก้อน (ก้ามอาจคว้า "ก้อนข้าง ๆ สีเดียวกัน" แทนก้อนเป้า)
                 self.pick_nearby = self._count_same_near(self.pick_pos, self.target["class"], 8.0)
                 self.link.pick()
+                self.jaw_open = False     # v5.3: หนีบแล้วปากปิดค้าง
                 self._go("PICK")
             gp = nav.gripper_point(ax, ay, th)
             return f"CREEP gap={nav.dist(*gp, *self.target['cm']):.1f}cm"
@@ -984,6 +991,7 @@ class Planner:
             if done or self.in_state() > C.T_CREEP_TIMEOUT * 2:      # v4.1: ทางเข้าวงยาวกว่าทางเข้าหิน (~15-20 cm)
                 self._drive(0, 0)
                 self.link.dump()
+                self.jaw_open = True      # v5.3: DUMP ค้างเปิด -> ก้อนถัดไปไม่ต้องสั่งอ้าซ้ำ
                 self._go("DUMP")
             gp = nav.gripper_point(ax, ay, th)
             return f"REVERSE_IN gap={nav.dist(*gp, *self.dump_pt):.1f}cm"
