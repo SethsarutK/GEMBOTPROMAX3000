@@ -303,19 +303,29 @@ class Planner:
         return best
 
     # ---------- หลบหิน (v3.8) ----------
-    def _filled_zones(self, gems):
-        """v4.1h: วงที่มีหินอยู่แล้ว (เห็นจากกล้อง หรือเราเคยปล่อยไว้) -> ห้ามขับทับ/หมุนในวง"""
+    def _filled_zones(self, gems, exempt=None):
+        """v4.1h: วงที่มีหินอยู่แล้ว (เห็นจากกล้อง หรือเราเคยปล่อยไว้) -> ห้ามขับทับ/หมุนในวง
+        v5.0: exempt = ชื่อวงที่ยกเว้น (ตอนตั้งใจเข้าไปหยิบหินผิดสีออกจากวงนั้น)"""
         names = set(self.zone_filled)
         for g in gems:
             z = self._in_zone(g["cm"])
             if z:
                 names.add(z)
+        names.discard(exempt)
         return [self.zones[n] for n in names if n in self.zones]
 
-    def _keep_out_of_zones(self, pt, gems):
+    def _pickable_wrong_zone(self, g, gems):
+        """v5.0 (external review): หินที่ตกใน "วงผิดสี" หยิบได้ ถ้าวงนั้นยังไม่มีหินสีถูกของมันเอง
+        (ถ้ามี = เข้าไปแล้วก้ามเสี่ยงกวาดแต้มที่ได้แล้วออก -> ปล่อยทิ้งไว้เหมือนเดิม)"""
+        zn = self._in_zone(g["cm"])
+        if zn is None or zn == g["class"]:
+            return False
+        return not any(o["class"] == zn and self._in_zone(o["cm"]) == zn for o in gems)
+
+    def _keep_out_of_zones(self, pt, gems, exempt=None):
         """v4.1h: ถ้าจุด (approach) อยู่ในวงที่มีหินแล้ว ให้เลื่อนออกไปนอกวง + รัศมีตัวหุ่น"""
         x, y = pt
-        for zx, zy in self._filled_zones(gems):
+        for zx, zy in self._filled_zones(gems, exempt):
             # v4.1j: ตอนหมุนตัว (ALIGN) ปลายก้ามที่อ้ากว้างกวาดเป็นวงรัศมี ~GRIP_REACH+7 รอบเพลา
             #        ถ้าเพลาห่างวงแค่ zr+BODY_R ก้ามจะกวาดหินในวงออก (sim: สาเหตุอันดับ 1 ของหินหลุดวง)
             need = self.zr + max(C.ROBOT_BODY_R_CM, C.GRIP_REACH_CM + 2.0)
@@ -333,7 +343,8 @@ class Planner:
                     and nav.dist(*g["cm"], *exclude["cm"]) < 4.0:
                 continue
             out.append(g["cm"])
-        for zx, zy in self._filled_zones(gems):
+        exempt = self._in_zone(exclude["cm"]) if exclude is not None else None
+        for zx, zy in self._filled_zones(gems, exempt):
             out.append((zx, zy))
             for k in range(8):                       # จุดรอบขอบวง ให้ A* เลี่ยงทั้งวง
                 a = k * math.pi / 4
@@ -373,7 +384,7 @@ class Planner:
 
     # ---------- เลือกหิน ----------
     def _choose(self, ax, ay, gems):
-        loose = [g for g in gems if self._in_zone(g["cm"]) is None
+        loose = [g for g in gems if (self._in_zone(g["cm"]) is None or self._pickable_wrong_zone(g, gems))
                  and g["class"] in self.zones
                  and g["class"] not in C.SKIP_COLORS
                  and not self._blacklisted(g)]
@@ -419,7 +430,8 @@ class Planner:
         if not cands:
             return None
         cands.sort(key=lambda c: c[0])
-        return cands[0][1], self._keep_out_of_zones(cands[0][2], gems)
+        return cands[0][1], self._keep_out_of_zones(cands[0][2], gems,
+                                                    exempt=self._in_zone(cands[0][1]["cm"]))
 
     def _approach_point(self, ax, ay, g, pile, gems=None):
         """จุด approach: ถอยจากหินออก "ด้านนอกกอง" ระยะ reach + standoff
@@ -432,7 +444,7 @@ class Planner:
         base = math.atan2(dy, dx)
         back = C.GRIP_REACH_CM + C.PILE_STANDOFF_CM
         first = None
-        zones_keep = self._filled_zones(gems) if gems is not None else []
+        zones_keep = self._filled_zones(gems, exempt=self._in_zone(g["cm"])) if gems is not None else []
         need = self.zr + max(C.ROBOT_BODY_R_CM, C.GRIP_REACH_CM + 2.0)
         best = None
         for off in (0, 30, -30, 60, -60, 90, -90, 120, -120):
